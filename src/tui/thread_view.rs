@@ -78,9 +78,9 @@ impl<'a> Widget for ThreadView<'a> {
 
             lines.push(RenderedLine {
                 content: vec![
-                    (format!("{}", from), from_style),
+                    (from.to_string(), from_style),
                     (" | ".to_string(), header_base.fg(Color::DarkGray)),
-                    (format!("{}", date), date_style),
+                    (date.to_string(), date_style),
                     (" ".to_string(), header_base),
                     (expand_indicator.to_string(), indicator_style),
                 ],
