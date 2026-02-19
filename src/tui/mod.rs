@@ -181,7 +181,7 @@ impl App {
                 folders.insert(e.maildir.clone());
             }
         }
-        // Scan maildir root for all real folders
+        // Scan maildir root recursively for all real folders
         if let Some(account) = self.config.accounts.first() {
             let root = if account.maildir.starts_with("~/") {
                 let home = std::env::var("HOME").unwrap_or_default();
@@ -189,18 +189,24 @@ impl App {
             } else {
                 account.maildir.clone()
             };
-            if let Ok(entries) = std::fs::read_dir(&root) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() && path.join("cur").is_dir() {
-                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            // Maildir uses a dot-prefix for subfolders (e.g. ".Archive")
-                            let folder = if name.starts_with('.') {
-                                format!("/{}", &name[1..])
+            let root_path = std::path::PathBuf::from(&root);
+            let mut stack = vec![root_path.clone()];
+            while let Some(dir) = stack.pop() {
+                if let Ok(entries) = std::fs::read_dir(&dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            if path.join("cur").is_dir() {
+                                if let Ok(rel) = path.strip_prefix(&root_path) {
+                                    let name = rel.to_string_lossy();
+                                    let name = name.strip_prefix('.').unwrap_or(&name);
+                                    folders.insert(format!("/{}", name));
+                                }
+                                // Also recurse into it — there may be sub-maildirs
+                                stack.push(path);
                             } else {
-                                format!("/{}", name)
-                            };
-                            folders.insert(folder);
+                                stack.push(path);
+                            }
                         }
                     }
                 }
