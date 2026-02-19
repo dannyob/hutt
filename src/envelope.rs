@@ -43,6 +43,24 @@ impl Flag {
             _ => None,
         }
     }
+
+    /// Convert a mu single-character flag to a Flag.
+    pub fn from_char(c: char) -> Option<Self> {
+        match c {
+            'D' => Some(Flag::Draft),
+            'F' => Some(Flag::Flagged),
+            'P' => Some(Flag::Passed),
+            'R' => Some(Flag::Replied),
+            'S' => Some(Flag::Seen),
+            'T' => Some(Flag::Trashed),
+            _ => None,
+        }
+    }
+}
+
+/// Parse a mu flag string (e.g., "SFR") into a Vec<Flag>.
+pub fn flags_from_string(s: &str) -> Vec<Flag> {
+    s.chars().filter_map(Flag::from_char).collect()
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +101,24 @@ impl Envelope {
 
     pub fn is_flagged(&self) -> bool {
         self.flags.contains(&Flag::Flagged)
+    }
+
+    /// Convert flags to mu's single-character flag string format.
+    /// D=Draft, F=Flagged, N=New, P=Passed, R=Replied, S=Seen, T=Trashed
+    pub fn flags_string(&self) -> String {
+        let mut s = String::new();
+        for flag in &self.flags {
+            match flag {
+                Flag::Draft => s.push('D'),
+                Flag::Flagged => s.push('F'),
+                Flag::Passed => s.push('P'),
+                Flag::Replied => s.push('R'),
+                Flag::Seen => s.push('S'),
+                Flag::Trashed => s.push('T'),
+                Flag::List | Flag::Unread => {} // not single-char mu flags
+            }
+        }
+        s
     }
 
     pub fn from_display(&self) -> String {

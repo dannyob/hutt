@@ -1,6 +1,11 @@
+pub mod command_palette;
 pub mod envelope_list;
+pub mod folder_picker;
 pub mod preview;
 pub mod status_bar;
+pub mod thread_view;
+
+use std::collections::HashSet;
 
 use anyhow::Result;
 use crossterm::{
@@ -16,16 +21,25 @@ use std::io;
 use std::time::Duration;
 use tokio::time::Instant;
 
-use crate::envelope::Envelope;
-use crate::keymap::{Action, KeyMapper};
+use crate::compose;
+use crate::config::Config;
+use crate::envelope::{flags_from_string, Envelope};
+use crate::keymap::{Action, InputMode, KeyMapper};
+use crate::links;
 use crate::mime_render::{self, RenderCache};
 use crate::mu_client::{FindOpts, MuClient};
+use crate::send;
+use crate::undo::{UndoEntry, UndoStack};
 
+use self::command_palette::{CommandPalette, PaletteEntry};
 use self::envelope_list::EnvelopeList;
+use self::folder_picker::FolderPicker;
 use self::preview::PreviewPane;
 use self::status_bar::{BottomBar, TopBar};
+use self::thread_view::{ThreadMessage, ThreadView};
 
 pub struct App {
+    // Core state
     pub current_folder: String,
     pub current_query: String,
     pub envelopes: Vec<Envelope>,
@@ -36,12 +50,53 @@ pub struct App {
     pub mu: MuClient,
     pub keymap: KeyMapper,
     pub should_quit: bool,
-    /// Track which message_id is currently loaded in preview
-    pub preview_loaded_for: Option<String>,
+
+    // Mode
+    pub mode: InputMode,
+
+    // Undo
+    pub undo_stack: UndoStack,
+
+    // Multi-select
+    pub selected_set: HashSet<u32>,
+
+    // Search
+    pub search_input: String,
+    pub previous_folder: Option<String>,
+
+    // Filters
+    pub filter_unread: bool,
+    pub filter_starred: bool,
+    pub filter_needs_reply: bool,
+
+    // Thread view
+    pub thread_messages: Vec<ThreadMessage>,
+    pub thread_selected: usize,
+    pub thread_scroll: u16,
+
+    // Folder picker
+    pub known_folders: Vec<String>,
+    pub folder_filter: String,
+    pub folder_selected: usize,
+
+    // Command palette
+    pub palette_filter: String,
+    pub palette_selected: usize,
+    pub palette_entries: Vec<PaletteEntry>,
+
+    // Status message (temporary feedback)
+    pub status_message: Option<String>,
+    pub status_time: Option<Instant>,
+
+    // Compose pending (set by action handler, processed by run loop)
+    pub compose_pending: Option<compose::ComposeKind>,
+
+    // Config
+    pub config: Config,
 }
 
 impl App {
-    pub async fn new(mu: MuClient) -> Result<Self> {
+    pub async fn new(mu: MuClient, config: Config) -> Result<Self> {
         Ok(Self {
             current_folder: "/Inbox".to_string(),
             current_query: String::new(),
@@ -53,24 +108,75 @@ impl App {
             mu,
             keymap: KeyMapper::new(),
             should_quit: false,
-            preview_loaded_for: None,
+            mode: InputMode::Normal,
+            undo_stack: UndoStack::new(),
+            selected_set: HashSet::new(),
+            search_input: String::new(),
+            previous_folder: None,
+            filter_unread: false,
+            filter_starred: false,
+            filter_needs_reply: false,
+            thread_messages: Vec::new(),
+            thread_selected: 0,
+            thread_scroll: 0,
+            known_folders: vec![
+                "/Inbox".into(),
+                "/Archive".into(),
+                "/Drafts".into(),
+                "/Sent".into(),
+                "/Trash".into(),
+                "/Junk".into(),
+            ],
+            folder_filter: String::new(),
+            folder_selected: 0,
+            palette_filter: String::new(),
+            palette_selected: 0,
+            palette_entries: PaletteEntry::all_actions(),
+            status_message: None,
+            status_time: None,
+            compose_pending: None,
+            config,
         })
     }
 
     pub async fn load_folder(&mut self) -> Result<()> {
-        let query = if self.current_folder.starts_with('/') {
-            format!("maildir:{}", self.current_folder)
-        } else {
-            // Treat as raw mu query
-            self.current_folder.clone()
-        };
+        let query = self.build_query();
         self.current_query = query.clone();
         self.envelopes = self.mu.find(&query, &FindOpts::default()).await?;
         self.selected = 0;
         self.scroll_offset = 0;
         self.preview_scroll = 0;
-        self.preview_loaded_for = None;
+        self.collect_known_folders();
         Ok(())
+    }
+
+    fn build_query(&self) -> String {
+        let mut query = if self.current_folder.starts_with('/') {
+            format!("maildir:{}", self.current_folder)
+        } else {
+            self.current_folder.clone()
+        };
+        if self.filter_unread {
+            query.push_str(" AND flag:unread");
+        }
+        if self.filter_starred {
+            query.push_str(" AND flag:flagged");
+        }
+        if self.filter_needs_reply {
+            query.push_str(" AND NOT flag:replied");
+        }
+        query
+    }
+
+    fn collect_known_folders(&mut self) {
+        let mut folders: HashSet<String> = self.known_folders.iter().cloned().collect();
+        for e in &self.envelopes {
+            if !e.maildir.is_empty() {
+                folders.insert(e.maildir.clone());
+            }
+        }
+        self.known_folders = folders.into_iter().collect();
+        self.known_folders.sort();
     }
 
     fn selected_envelope(&self) -> Option<&Envelope> {
@@ -82,43 +188,316 @@ impl App {
             Some(e) => e,
             None => return,
         };
-
         let msg_id = &envelope.message_id;
-
-        // Already cached?
         if self.preview_cache.get(msg_id, width).is_some() {
             return;
         }
-
-        // Render synchronously (file I/O, fast enough for now)
         match mime_render::render_message(&envelope.path, width) {
-            Ok(text) => {
-                self.preview_cache.insert(msg_id.clone(), width, text);
-            }
-            Err(e) => {
-                self.preview_cache.insert(
-                    msg_id.clone(),
-                    width,
-                    format!("[Error rendering message: {}]", e),
-                );
+            Ok(text) => self.preview_cache.insert(msg_id.clone(), width, text),
+            Err(e) => self.preview_cache.insert(
+                msg_id.clone(),
+                width,
+                format!("[Error rendering message: {}]", e),
+            ),
+        }
+    }
+
+    fn set_status(&mut self, msg: impl Into<String>) {
+        self.status_message = Some(msg.into());
+        self.status_time = Some(Instant::now());
+    }
+
+    fn clear_stale_status(&mut self) {
+        if let Some(t) = self.status_time {
+            if t.elapsed() > Duration::from_secs(3) {
+                self.status_message = None;
+                self.status_time = None;
             }
         }
     }
 
-    fn handle_action(&mut self, action: Action) {
+    fn filter_description(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if self.filter_unread {
+            parts.push("unread");
+        }
+        if self.filter_starred {
+            parts.push("starred");
+        }
+        if self.filter_needs_reply {
+            parts.push("needs-reply");
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("+"))
+        }
+    }
+
+    // ── Navigation ──────────────────────────────────────────────────
+
+    fn move_down(&mut self) {
+        if self.selected + 1 < self.envelopes.len() {
+            self.selected += 1;
+            self.preview_scroll = 0;
+        }
+    }
+
+    fn move_up(&mut self) {
+        if self.selected > 0 {
+            self.selected -= 1;
+            self.preview_scroll = 0;
+        }
+    }
+
+    // ── Triage ──────────────────────────────────────────────────────
+
+    async fn triage_move(&mut self, dest_maildir: &str, desc: &str) -> Result<()> {
+        let targets = self.triage_targets();
+        if targets.is_empty() {
+            return Ok(());
+        }
+        let count = targets.len();
+        for (docid, maildir, flags) in &targets {
+            self.undo_stack.push(UndoEntry {
+                docid: *docid,
+                original_maildir: maildir.clone(),
+                original_flags: flags.clone(),
+                description: desc.to_string(),
+            });
+            let _ = self.mu.move_msg(*docid, Some(dest_maildir), None).await;
+        }
+        let removed: HashSet<u32> = targets.iter().map(|(d, _, _)| *d).collect();
+        self.envelopes.retain(|e| !removed.contains(&e.docid));
+        self.selected_set.clear();
+        self.clamp_selection();
+        self.preview_scroll = 0;
+        self.set_status(format!("{} {} message(s)", desc, count));
+        Ok(())
+    }
+
+    async fn triage_toggle_flag(&mut self, flag_char: char, desc: &str) -> Result<()> {
+        let targets = self.triage_targets();
+        if targets.is_empty() {
+            return Ok(());
+        }
+        let count = targets.len();
+        for (docid, _maildir, flags) in &targets {
+            self.undo_stack.push(UndoEntry {
+                docid: *docid,
+                original_maildir: _maildir.clone(),
+                original_flags: flags.clone(),
+                description: format!("toggle {}", desc),
+            });
+            let new_flags = if flags.contains(flag_char) {
+                flags.replace(flag_char, "")
+            } else {
+                format!("{}{}", flags, flag_char)
+            };
+            let _ = self.mu.move_msg(*docid, None, Some(&new_flags)).await;
+            if let Some(e) = self.envelopes.iter_mut().find(|e| e.docid == *docid) {
+                e.flags = flags_from_string(&new_flags);
+            }
+        }
+        self.selected_set.clear();
+        self.set_status(format!("Toggled {} on {} message(s)", desc, count));
+        Ok(())
+    }
+
+    fn triage_targets(&self) -> Vec<(u32, String, String)> {
+        if !self.selected_set.is_empty() {
+            self.envelopes
+                .iter()
+                .filter(|e| self.selected_set.contains(&e.docid))
+                .map(|e| (e.docid, e.maildir.clone(), e.flags_string()))
+                .collect()
+        } else if let Some(e) = self.envelopes.get(self.selected) {
+            vec![(e.docid, e.maildir.clone(), e.flags_string())]
+        } else {
+            vec![]
+        }
+    }
+
+    fn clamp_selection(&mut self) {
+        if !self.envelopes.is_empty() && self.selected >= self.envelopes.len() {
+            self.selected = self.envelopes.len() - 1;
+        }
+    }
+
+    async fn undo(&mut self) -> Result<()> {
+        if let Some(entry) = self.undo_stack.pop() {
+            let _ = self
+                .mu
+                .move_msg(
+                    entry.docid,
+                    Some(&entry.original_maildir),
+                    Some(&entry.original_flags),
+                )
+                .await;
+            self.load_folder().await?;
+            self.set_status(format!("Undone: {}", entry.description));
+        } else {
+            self.set_status("Nothing to undo");
+        }
+        Ok(())
+    }
+
+    // ── Folder switching ────────────────────────────────────────────
+
+    async fn navigate_folder(&mut self, folder: &str) -> Result<()> {
+        self.previous_folder = Some(self.current_folder.clone());
+        self.current_folder = folder.to_string();
+        self.filter_unread = false;
+        self.filter_starred = false;
+        self.filter_needs_reply = false;
+        self.load_folder().await?;
+        self.set_status(format!("Switched to {}", folder));
+        Ok(())
+    }
+
+    // ── Search ──────────────────────────────────────────────────────
+
+    async fn execute_search(&mut self) -> Result<()> {
+        if self.search_input.is_empty() {
+            self.mode = InputMode::Normal;
+            return Ok(());
+        }
+        self.previous_folder = Some(self.current_folder.clone());
+        self.current_folder = self.search_input.clone();
+        self.mode = InputMode::Normal;
+        self.load_folder().await?;
+        self.set_status(format!("Search: {}", self.search_input));
+        Ok(())
+    }
+
+    // ── Thread view ─────────────────────────────────────────────────
+
+    async fn open_thread(&mut self) -> Result<()> {
+        let envelope = match self.envelopes.get(self.selected) {
+            Some(e) => e.clone(),
+            None => return Ok(()),
+        };
+        let query = format!("msgid:{}", envelope.message_id);
+        let opts = FindOpts {
+            threads: true,
+            include_related: true,
+            descending: false,
+            ..Default::default()
+        };
+        let thread_envelopes = self.mu.find(&query, &opts).await.unwrap_or_default();
+        if thread_envelopes.is_empty() {
+            self.thread_messages = vec![ThreadMessage {
+                envelope: envelope.clone(),
+                body: None,
+                expanded: true,
+            }];
+        } else {
+            self.thread_messages = thread_envelopes
+                .into_iter()
+                .map(|e| {
+                    let is_selected = e.message_id == envelope.message_id;
+                    ThreadMessage {
+                        envelope: e,
+                        body: None,
+                        expanded: is_selected,
+                    }
+                })
+                .collect();
+        }
+        self.thread_selected = self
+            .thread_messages
+            .iter()
+            .position(|m| m.envelope.message_id == envelope.message_id)
+            .unwrap_or(0);
+        self.thread_scroll = 0;
+        self.mode = InputMode::ThreadView;
+        Ok(())
+    }
+
+    fn ensure_thread_body_loaded(&mut self, width: u16) {
+        for msg in &mut self.thread_messages {
+            if msg.expanded && msg.body.is_none() {
+                match mime_render::render_message(&msg.envelope.path, width) {
+                    Ok(text) => msg.body = Some(text),
+                    Err(e) => msg.body = Some(format!("[Error: {}]", e)),
+                }
+            }
+        }
+    }
+
+    // ── Multi-select ────────────────────────────────────────────────
+
+    fn toggle_select(&mut self) {
+        if let Some(e) = self.envelopes.get(self.selected) {
+            let docid = e.docid;
+            if self.selected_set.contains(&docid) {
+                self.selected_set.remove(&docid);
+            } else {
+                self.selected_set.insert(docid);
+            }
+        }
+    }
+
+    // ── Compose helpers ─────────────────────────────────────────────
+
+    fn build_compose_context(
+        &self,
+        kind: &compose::ComposeKind,
+    ) -> Option<compose::ComposeContext> {
+        match kind {
+            compose::ComposeKind::NewMessage => Some(compose::ComposeContext::new_message()),
+            compose::ComposeKind::Reply => {
+                let envelope = self.selected_envelope()?;
+                let body_text =
+                    mime_render::render_message(&envelope.path, 80).unwrap_or_default();
+                Some(compose::ComposeContext::reply(envelope, &body_text, false))
+            }
+            compose::ComposeKind::ReplyAll => {
+                let envelope = self.selected_envelope()?;
+                let body_text =
+                    mime_render::render_message(&envelope.path, 80).unwrap_or_default();
+                Some(compose::ComposeContext::reply(envelope, &body_text, true))
+            }
+            compose::ComposeKind::Forward => {
+                let envelope = self.selected_envelope()?;
+                let body_text =
+                    mime_render::render_message(&envelope.path, 80).unwrap_or_default();
+                Some(compose::ComposeContext::forward(envelope, &body_text))
+            }
+        }
+    }
+
+    // ── Filtered list helpers ───────────────────────────────────────
+
+    fn filtered_folders(&self) -> Vec<String> {
+        let filter = self.folder_filter.to_lowercase();
+        self.known_folders
+            .iter()
+            .filter(|f| filter.is_empty() || f.to_lowercase().contains(&filter))
+            .cloned()
+            .collect()
+    }
+
+    fn filtered_palette(&self) -> Vec<PaletteEntry> {
+        let filter = self.palette_filter.to_lowercase();
+        self.palette_entries
+            .iter()
+            .filter(|e| {
+                filter.is_empty()
+                    || e.name.to_lowercase().contains(&filter)
+                    || e.description.to_lowercase().contains(&filter)
+            })
+            .cloned()
+            .collect()
+    }
+
+    // ── Action dispatch ─────────────────────────────────────────────
+
+    async fn handle_action(&mut self, action: Action) -> Result<()> {
         match action {
-            Action::MoveDown => {
-                if self.selected + 1 < self.envelopes.len() {
-                    self.selected += 1;
-                    self.preview_scroll = 0;
-                }
-            }
-            Action::MoveUp => {
-                if self.selected > 0 {
-                    self.selected -= 1;
-                    self.preview_scroll = 0;
-                }
-            }
+            // Navigation
+            Action::MoveDown => self.move_down(),
+            Action::MoveUp => self.move_up(),
             Action::JumpTop => {
                 self.selected = 0;
                 self.preview_scroll = 0;
@@ -130,24 +509,256 @@ impl App {
                 }
             }
             Action::ScrollPreviewDown => {
-                self.preview_scroll = self.preview_scroll.saturating_add(5);
+                if self.mode == InputMode::ThreadView {
+                    self.thread_scroll = self.thread_scroll.saturating_add(5);
+                } else {
+                    self.preview_scroll = self.preview_scroll.saturating_add(5);
+                }
             }
             Action::ScrollPreviewUp => {
-                self.preview_scroll = self.preview_scroll.saturating_sub(5);
+                if self.mode == InputMode::ThreadView {
+                    self.thread_scroll = self.thread_scroll.saturating_sub(5);
+                } else {
+                    self.preview_scroll = self.preview_scroll.saturating_sub(5);
+                }
             }
-            Action::Quit => {
-                self.should_quit = true;
+            Action::HalfPageDown => {
+                let max = if self.envelopes.is_empty() {
+                    0
+                } else {
+                    self.envelopes.len() - 1
+                };
+                self.selected = (self.selected + 10).min(max);
+                self.preview_scroll = 0;
             }
+            Action::HalfPageUp => {
+                self.selected = self.selected.saturating_sub(10);
+                self.preview_scroll = 0;
+            }
+
+            // Triage
+            Action::Archive => self.triage_move("/Archive", "Archived").await?,
+            Action::Trash => self.triage_move("/Trash", "Trashed").await?,
+            Action::Spam => self.triage_move("/Junk", "Marked as spam").await?,
+            Action::ToggleRead => self.triage_toggle_flag('S', "read/unread").await?,
+            Action::ToggleStar => self.triage_toggle_flag('F', "star").await?,
+            Action::Undo => self.undo().await?,
+
+            // Folder switching
+            Action::GoInbox => self.navigate_folder("/Inbox").await?,
+            Action::GoArchive => self.navigate_folder("/Archive").await?,
+            Action::GoDrafts => self.navigate_folder("/Drafts").await?,
+            Action::GoSent => self.navigate_folder("/Sent").await?,
+            Action::GoTrash => self.navigate_folder("/Trash").await?,
+            Action::GoSpam => self.navigate_folder("/Junk").await?,
+            Action::GoFolderPicker => {
+                self.folder_filter.clear();
+                self.folder_selected = 0;
+                self.mode = InputMode::FolderPicker;
+            }
+
+            // Search
+            Action::EnterSearch => {
+                self.search_input.clear();
+                self.mode = InputMode::Search;
+            }
+
+            // Filters
+            Action::FilterUnread => {
+                self.filter_unread = !self.filter_unread;
+                self.load_folder().await?;
+            }
+            Action::FilterStarred => {
+                self.filter_starred = !self.filter_starred;
+                self.load_folder().await?;
+            }
+            Action::FilterNeedsReply => {
+                self.filter_needs_reply = !self.filter_needs_reply;
+                self.load_folder().await?;
+            }
+
+            // Multi-select
+            Action::ToggleSelect => {
+                self.toggle_select();
+                self.move_down();
+            }
+            Action::SelectDown => {
+                self.toggle_select();
+                self.move_down();
+            }
+            Action::SelectUp => {
+                self.toggle_select();
+                self.move_up();
+            }
+
+            // Thread view
+            Action::OpenThread => self.open_thread().await?,
+            Action::CloseThread => {
+                self.mode = InputMode::Normal;
+                self.thread_messages.clear();
+            }
+            Action::ThreadNext => {
+                if self.thread_selected + 1 < self.thread_messages.len() {
+                    self.thread_selected += 1;
+                }
+            }
+            Action::ThreadPrev => {
+                if self.thread_selected > 0 {
+                    self.thread_selected -= 1;
+                }
+            }
+            Action::ThreadToggleExpand => {
+                if let Some(msg) = self.thread_messages.get_mut(self.thread_selected) {
+                    msg.expanded = !msg.expanded;
+                }
+            }
+            Action::ThreadExpandAll => {
+                let all_expanded = self.thread_messages.iter().all(|m| m.expanded);
+                for msg in &mut self.thread_messages {
+                    msg.expanded = !all_expanded;
+                }
+            }
+
+            // Compose
+            Action::Compose => self.compose_pending = Some(compose::ComposeKind::NewMessage),
+            Action::Reply => self.compose_pending = Some(compose::ComposeKind::Reply),
+            Action::ReplyAll => self.compose_pending = Some(compose::ComposeKind::ReplyAll),
+            Action::Forward => self.compose_pending = Some(compose::ComposeKind::Forward),
+
+            // Linkability
+            Action::CopyMessageUrl => {
+                if let Some(e) = self.selected_envelope() {
+                    let url = links::format_message_url(&e.message_id);
+                    match links::copy_to_clipboard(&url) {
+                        Ok(()) => self.set_status("Message URL copied"),
+                        Err(e) => self.set_status(format!("Clipboard error: {}", e)),
+                    }
+                }
+            }
+            Action::CopyThreadUrl => {
+                if let Some(e) = self.selected_envelope() {
+                    let url = links::format_thread_url(&e.message_id);
+                    match links::copy_to_clipboard(&url) {
+                        Ok(()) => self.set_status("Thread URL copied"),
+                        Err(e) => self.set_status(format!("Clipboard error: {}", e)),
+                    }
+                }
+            }
+            Action::OpenInBrowser => {
+                if let Some(e) = self.selected_envelope() {
+                    let path = e.path.clone();
+                    match std::fs::read(&path) {
+                        Ok(raw) => {
+                            if let Some(msg) = mail_parser::MessageParser::default().parse(&raw) {
+                                if let Some(html) = msg.body_html(0) {
+                                    let _ = links::open_html_in_browser(html.as_bytes());
+                                    self.set_status("Opened in browser");
+                                } else {
+                                    self.set_status("No HTML content");
+                                }
+                            }
+                        }
+                        Err(e) => self.set_status(format!("Read error: {}", e)),
+                    }
+                }
+            }
+
+            // Command palette
+            Action::OpenCommandPalette => {
+                self.palette_filter.clear();
+                self.palette_selected = 0;
+                self.palette_entries = PaletteEntry::all_actions();
+                self.mode = InputMode::CommandPalette;
+            }
+
+            // Sync
+            Action::SyncMail => {
+                let sync_cmd = self.config.sync_command.clone();
+                if let Some(cmd) = sync_cmd {
+                    self.set_status("Syncing...");
+                    let _ = tokio::process::Command::new("sh")
+                        .args(["-c", &cmd])
+                        .output()
+                        .await;
+                    let _ = self.mu.index(true).await;
+                    self.load_folder().await?;
+                    self.set_status("Sync complete");
+                } else {
+                    self.set_status("No sync_command configured");
+                }
+            }
+
+            // Text input
+            Action::InputChar(c) => match self.mode {
+                InputMode::Search => self.search_input.push(c),
+                InputMode::FolderPicker => {
+                    self.folder_filter.push(c);
+                    self.folder_selected = 0;
+                }
+                InputMode::CommandPalette => {
+                    self.palette_filter.push(c);
+                    self.palette_selected = 0;
+                }
+                _ => {}
+            },
+            Action::InputBackspace => match self.mode {
+                InputMode::Search => {
+                    self.search_input.pop();
+                }
+                InputMode::FolderPicker => {
+                    self.folder_filter.pop();
+                    self.folder_selected = 0;
+                }
+                InputMode::CommandPalette => {
+                    self.palette_filter.pop();
+                    self.palette_selected = 0;
+                }
+                _ => {}
+            },
+            Action::InputSubmit => match self.mode {
+                InputMode::Search => self.execute_search().await?,
+                InputMode::FolderPicker => {
+                    let filtered = self.filtered_folders();
+                    if let Some(folder) = filtered.get(self.folder_selected).cloned() {
+                        self.mode = InputMode::Normal;
+                        self.navigate_folder(&folder).await?;
+                    }
+                }
+                InputMode::CommandPalette => {
+                    let filtered = self.filtered_palette();
+                    if let Some(entry) = filtered.get(self.palette_selected) {
+                        let action = entry.action.clone();
+                        self.mode = InputMode::Normal;
+                        Box::pin(self.handle_action(action)).await?;
+                    }
+                }
+                _ => {}
+            },
+            Action::InputCancel => match self.mode {
+                InputMode::Search => {
+                    self.mode = InputMode::Normal;
+                    if let Some(prev) = self.previous_folder.take() {
+                        self.current_folder = prev;
+                        self.load_folder().await?;
+                    }
+                }
+                InputMode::FolderPicker | InputMode::CommandPalette => {
+                    self.mode = InputMode::Normal;
+                }
+                _ => {}
+            },
+
+            // System
+            Action::Quit => self.should_quit = true,
             Action::Noop => {}
         }
+        Ok(())
     }
 }
 
 pub async fn run(mut app: App) -> Result<()> {
-    // Load initial folder
     app.load_folder().await?;
 
-    // Setup terminal
     terminal::enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
     let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
@@ -158,89 +769,185 @@ pub async fn run(mut app: App) -> Result<()> {
     let mut last_key_time = Instant::now();
 
     loop {
-        // Render
+        app.clear_stale_status();
+
         let preview_width = {
             let size = terminal.size()?;
-            // 65% of total width for preview, minus some padding
             (size.width * 65 / 100).saturating_sub(4)
         };
-        app.ensure_preview_loaded(preview_width);
+
+        if app.mode == InputMode::ThreadView {
+            app.ensure_thread_body_loaded(preview_width);
+        } else {
+            app.ensure_preview_loaded(preview_width);
+        }
 
         terminal.draw(|frame| {
             let size = frame.area();
-
-            // Top bar / content / bottom bar
             let outer = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(1), // top bar
-                    Constraint::Min(3),    // content
-                    Constraint::Length(1), // bottom bar
+                    Constraint::Length(1),
+                    Constraint::Min(3),
+                    Constraint::Length(1),
                 ])
                 .split(size);
 
             // Top bar
+            let thread_subject = if app.mode == InputMode::ThreadView {
+                app.thread_messages
+                    .first()
+                    .map(|m| m.envelope.subject.as_str())
+            } else {
+                None
+            };
             let unread = app.envelopes.iter().filter(|e| e.is_unread()).count();
             let top = TopBar {
                 folder: &app.current_folder,
                 unread_count: unread,
                 total_count: app.envelopes.len(),
+                mode: &app.mode,
+                thread_subject,
             };
             frame.render_widget(top, outer[0]);
 
-            // Content: envelope list | preview
-            let content = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Percentage(35),
-                    Constraint::Percentage(65),
-                ])
-                .split(outer[1]);
+            // Content
+            match app.mode {
+                InputMode::ThreadView => {
+                    let tv = ThreadView {
+                        messages: &app.thread_messages,
+                        selected: app.thread_selected,
+                        scroll: app.thread_scroll,
+                    };
+                    frame.render_widget(tv, outer[1]);
+                }
+                _ => {
+                    let content = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+                        .split(outer[1]);
 
-            // Envelope list
-            let env_list = EnvelopeList {
-                envelopes: &app.envelopes,
-                selected: app.selected,
-                offset: app.scroll_offset,
-            };
-            frame.render_widget(env_list, content[0]);
+                    let env_list = EnvelopeList {
+                        envelopes: &app.envelopes,
+                        selected: app.selected,
+                        offset: app.scroll_offset,
+                        multi_selected: &app.selected_set,
+                    };
+                    frame.render_widget(env_list, content[0]);
 
-            // Update scroll offset after rendering knows the height
-            let height = content[0].height as usize;
-            let (new_offset, _) = EnvelopeList::visible_range(
-                app.selected,
-                app.scroll_offset,
-                height,
-                app.envelopes.len(),
-            );
-            app.scroll_offset = new_offset;
+                    let height = content[0].height as usize;
+                    let (new_offset, _) = EnvelopeList::visible_range(
+                        app.selected,
+                        app.scroll_offset,
+                        height,
+                        app.envelopes.len(),
+                    );
+                    app.scroll_offset = new_offset;
 
-            // Preview pane
-            let envelope = app.selected_envelope();
-            let body = envelope
-                .and_then(|e| app.preview_cache.get(&e.message_id, preview_width));
-            let preview = PreviewPane {
-                envelope,
-                body,
-                scroll: app.preview_scroll,
-            };
-            frame.render_widget(preview, content[1]);
+                    let envelope = app.selected_envelope();
+                    let body = envelope
+                        .and_then(|e| app.preview_cache.get(&e.message_id, preview_width));
+                    let preview = PreviewPane {
+                        envelope,
+                        body,
+                        scroll: app.preview_scroll,
+                    };
+                    frame.render_widget(preview, content[1]);
+                }
+            }
 
             // Bottom bar
-            let pending = if app.keymap.has_pending() {
-                Some("g")
-            } else {
-                None
-            };
+            let filter_desc = app.filter_description();
             let bottom = BottomBar {
-                hints: "j/k:nav  gg:top  G:bottom  Space:scroll  q:quit",
-                pending_key: pending,
+                mode: &app.mode,
+                pending_key: app.keymap.pending_display(),
+                search_input: if app.mode == InputMode::Search {
+                    Some(&app.search_input)
+                } else {
+                    None
+                },
+                status_message: app.status_message.as_deref(),
+                filter_desc: filter_desc.as_deref(),
+                selection_count: app.selected_set.len(),
             };
             frame.render_widget(bottom, outer[2]);
+
+            // Popup overlays
+            if app.mode == InputMode::FolderPicker {
+                let filtered = app.filtered_folders();
+                let picker = FolderPicker {
+                    folders: &filtered,
+                    selected: app.folder_selected,
+                    filter: &app.folder_filter,
+                };
+                frame.render_widget(picker, size);
+            }
+            if app.mode == InputMode::CommandPalette {
+                let filtered = app.filtered_palette();
+                let palette = CommandPalette {
+                    entries: &filtered,
+                    filter: &app.palette_filter,
+                    selected: app.palette_selected,
+                };
+                frame.render_widget(palette, size);
+            }
         })?;
 
         if app.should_quit {
             break;
+        }
+
+        // Handle compose (requires terminal suspend/resume)
+        if let Some(kind) = app.compose_pending.take() {
+            if let Some(ctx) = app.build_compose_context(&kind) {
+                let from_email = app
+                    .config
+                    .accounts
+                    .first()
+                    .map(|a| a.email.as_str())
+                    .unwrap_or("user@example.com");
+
+                match compose::build_compose_file(&ctx, from_email) {
+                    Ok(content) => {
+                        let tmp_path = std::env::temp_dir()
+                            .join(format!("hutt-compose-{}.eml", std::process::id()));
+                        if std::fs::write(&tmp_path, &content).is_ok() {
+                            terminal::disable_raw_mode()?;
+                            io::stdout().execute(LeaveAlternateScreen)?;
+
+                            let modified =
+                                compose::launch_editor(&tmp_path, &app.config.editor)
+                                    .unwrap_or(false);
+
+                            terminal::enable_raw_mode()?;
+                            io::stdout().execute(EnterAlternateScreen)?;
+                            terminal.clear()?;
+
+                            if modified {
+                                if let Ok(msg_content) = std::fs::read_to_string(&tmp_path) {
+                                    if let Some(smtp_cfg) =
+                                        app.config.accounts.first().map(|a| &a.smtp)
+                                    {
+                                        match send::send_message(&msg_content, smtp_cfg).await {
+                                            Ok(()) => app.set_status("Message sent"),
+                                            Err(e) => {
+                                                app.set_status(format!("Send error: {}", e))
+                                            }
+                                        }
+                                    } else {
+                                        app.set_status("No SMTP config — message saved to temp");
+                                    }
+                                }
+                            } else {
+                                app.set_status("Compose cancelled");
+                            }
+                            let _ = std::fs::remove_file(&tmp_path);
+                        }
+                    }
+                    Err(e) => app.set_status(format!("Compose error: {}", e)),
+                }
+            }
+            continue;
         }
 
         // Handle key sequence timeout
@@ -248,7 +955,6 @@ pub async fn run(mut app: App) -> Result<()> {
             app.keymap.cancel_pending();
         }
 
-        // Poll for events with timeout
         let timeout = if app.keymap.has_pending() {
             sequence_timeout
         } else {
@@ -257,21 +963,52 @@ pub async fn run(mut app: App) -> Result<()> {
 
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
-                // crossterm sends Press and Release on some platforms
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
                 last_key_time = Instant::now();
-                let action = app.keymap.handle(key);
-                app.handle_action(action);
+
+                // In popup modes, handle arrow keys for navigation before passing to keymap
+                match app.mode {
+                    InputMode::FolderPicker => {
+                        if key.code == crossterm::event::KeyCode::Down {
+                            let max = app.filtered_folders().len();
+                            if app.folder_selected + 1 < max {
+                                app.folder_selected += 1;
+                            }
+                            continue;
+                        }
+                        if key.code == crossterm::event::KeyCode::Up {
+                            app.folder_selected = app.folder_selected.saturating_sub(1);
+                            continue;
+                        }
+                    }
+                    InputMode::CommandPalette => {
+                        if key.code == crossterm::event::KeyCode::Down {
+                            let max = app.filtered_palette().len();
+                            if app.palette_selected + 1 < max {
+                                app.palette_selected += 1;
+                            }
+                            continue;
+                        }
+                        if key.code == crossterm::event::KeyCode::Up {
+                            app.palette_selected = app.palette_selected.saturating_sub(1);
+                            continue;
+                        }
+                    }
+                    _ => {}
+                }
+
+                let action = app.keymap.handle(key, &app.mode);
+                if let Err(e) = app.handle_action(action).await {
+                    app.set_status(format!("Error: {}", e));
+                }
             }
         }
     }
 
-    // Cleanup
     terminal::disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
     app.mu.quit().await?;
-
     Ok(())
 }

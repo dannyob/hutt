@@ -1,9 +1,14 @@
+mod compose;
+mod config;
 mod envelope;
 mod keymap;
+mod links;
 mod mime_render;
 mod mu_client;
 mod mu_sexp;
+mod send;
 mod tui;
+mod undo;
 
 use anyhow::Result;
 
@@ -11,16 +16,18 @@ use anyhow::Result;
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
-    // Optional: first arg is initial folder or query
     let initial_folder = if args.len() > 1 {
         args[1].clone()
     } else {
         "/Inbox".to_string()
     };
 
+    // Load config
+    let config = config::Config::load()?;
+
     // Start mu server
     let mu = mu_client::MuClient::start().await?;
-    let mut app = tui::App::new(mu).await?;
+    let mut app = tui::App::new(mu, config).await?;
     app.current_folder = initial_folder;
     tui::run(app).await
 }
