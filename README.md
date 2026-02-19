@@ -208,9 +208,12 @@ The plugin provides:
 To register the `hutt://` URL scheme on macOS:
 
 ```sh
-cp -r macos/hutt-opener ~/Applications/"Hutt Opener.app"
-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f ~/Applications/"Hutt Opener.app"
+make install-macos-handler
 ```
+
+This uses `osacompile` to build an AppleScript applet that can receive macOS
+URL open events, bundles it with the IPC shell script, and registers the
+`hutt://` scheme with Launch Services.
 
 This allows clicking `hutt://message/<id>` links to open the corresponding
 message in a running hutt instance. hutt must be running (it listens on a
