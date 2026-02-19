@@ -1,0 +1,123 @@
+# Hutt — sample configuration file
+#
+# Place this file at one of:
+#   $HUTT_CONFIG              (explicit override)
+#   $XDG_CONFIG_HOME/hutt/config.toml
+#   ~/.config/hutt/config.toml
+
+# ---------------------------------------------------------------------------
+# General
+# ---------------------------------------------------------------------------
+
+# Editor command used when composing messages.
+# Hutt will try to open the editor in a kitty/tmux split if possible,
+# otherwise it blocks the TUI until the editor exits.
+# Default: "nvim"
+editor = "nvim"
+
+# Shell command to sync mail before refreshing the envelope list.
+# Hutt runs this when you press Ctrl-R (SyncMail).
+# Leave unset (or comment out) if you handle sync externally.
+# sync_command = "mbsync -a"
+# sync_command = "offlineimap -o -a Work"
+
+# ---------------------------------------------------------------------------
+# Accounts
+# ---------------------------------------------------------------------------
+# You can define multiple [[accounts]] sections.  The first account is used
+# as the default "From" address when composing new messages.
+
+[[accounts]]
+name     = "Work"
+email    = "you@example.com"
+maildir  = "~/Maildir/work"       # root of the Maildir tree for this account
+
+# --- SMTP ---
+[accounts.smtp]
+host       = "smtp.example.com"
+port       = 465                   # 465 for implicit TLS, 587 for STARTTLS
+encryption = "ssl"                 # "ssl" | "starttls" | "none"
+username   = "you@example.com"
+
+# Provide EXACTLY ONE of: password, password_command, or oauth2_command.
+# Plain-text password (not recommended — use password_command instead):
+# password = "hunter2"
+
+# Shell command whose stdout is the password:
+password_command = "pass email/work"
+
+# OAuth2 access-token command (for providers that require it):
+# oauth2_command = "oauth2-helper get-token --account work"
+
+# --- Folder mappings ---
+# Map logical folder names to the Maildir subfolder paths.
+# These are the defaults; override only if your provider uses different names.
+[accounts.folders]
+inbox   = "/INBOX"
+archive = "/All Mail"
+drafts  = "/Drafts"
+sent    = "/Sent Mail"
+trash   = "/Bin"
+spam    = "/Junk"
+
+# ---------------------------------------------------------------------------
+# A second account example (commented out)
+# ---------------------------------------------------------------------------
+# [[accounts]]
+# name     = "Personal"
+# email    = "me@personal.example"
+# maildir  = "~/Maildir/personal"
+#
+# [accounts.smtp]
+# host             = "smtp.personal.example"
+# port             = 587
+# encryption       = "starttls"
+# username         = "me@personal.example"
+# password_command = "pass email/personal"
+#
+# [accounts.folders]
+# inbox   = "/Inbox"
+# archive = "/Archive"
+# drafts  = "/Drafts"
+# sent    = "/Sent"
+# trash   = "/Trash"
+# spam    = "/Spam"
+
+# ---------------------------------------------------------------------------
+# Snippets
+# ---------------------------------------------------------------------------
+# Snippets are short text expansions triggered by a prefix while composing.
+# Type the trigger string and it will be replaced by the body text.
+
+[[snippets]]
+trigger = "/sig"
+body    = """\
+Best regards,
+Your Name
+"""
+
+[[snippets]]
+trigger = "/ty"
+body    = "Thanks for your email — I'll get back to you shortly."
+
+[[snippets]]
+trigger = "/addr"
+body    = """\
+123 Example Street
+Anytown, CA 90210
+"""
+
+# ---------------------------------------------------------------------------
+# Keybinding overrides
+# ---------------------------------------------------------------------------
+# Override the default key for any named action.
+# Action names match the keymap module: archive, trash, spam, toggle_read,
+# toggle_star, undo, compose, reply, reply_all, forward, copy_message_url,
+# copy_thread_url, open_in_browser, sync_mail, quit, etc.
+#
+# Values are single-character strings or special names like "Enter", "Esc".
+
+[keybindings]
+# archive = "A"     # default: e
+# trash   = "D"     # default: #
+# spam    = "S"     # default: !
