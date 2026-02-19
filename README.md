@@ -249,7 +249,7 @@ with `xdg-mime` as the handler for `x-scheme-handler/hutt`.
 
 Requires Windows 10 1803+ for Unix domain socket support. The Rust
 `socket_path()` would need a Windows-specific branch (not yet
-implemented).
+implemented). **Currently untested** — contributions welcome.
 
 ## Debugging
 
