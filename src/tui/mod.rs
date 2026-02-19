@@ -181,6 +181,31 @@ impl App {
                 folders.insert(e.maildir.clone());
             }
         }
+        // Scan maildir root for all real folders
+        if let Some(account) = self.config.accounts.first() {
+            let root = if account.maildir.starts_with("~/") {
+                let home = std::env::var("HOME").unwrap_or_default();
+                format!("{}/{}", home, &account.maildir[2..])
+            } else {
+                account.maildir.clone()
+            };
+            if let Ok(entries) = std::fs::read_dir(&root) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() && path.join("cur").is_dir() {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            // Maildir uses a dot-prefix for subfolders (e.g. ".Archive")
+                            let folder = if name.starts_with('.') {
+                                format!("/{}", &name[1..])
+                            } else {
+                                format!("/{}", name)
+                            };
+                            folders.insert(folder);
+                        }
+                    }
+                }
+            }
+        }
         self.known_folders = folders.into_iter().collect();
         self.known_folders.sort();
     }
