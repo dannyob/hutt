@@ -556,38 +556,56 @@ impl App {
     // ── IPC command handling ──────────────────────────────────────────
 
     async fn handle_ipc_command(&mut self, cmd: IpcCommand) -> Result<()> {
+        debug_log!("handle_ipc_command: {:?}", cmd);
         match cmd {
             IpcCommand::Open(url_serde) => {
                 let url: HuttUrl = url_serde.into();
                 match url {
                     HuttUrl::Message(id) => {
-                        // Search for the message and select it
                         let query = format!("msgid:{}", id);
+                        debug_log!("IPC Message: query={}", query);
+                        self.mode = InputMode::Normal;
+                        self.thread_messages.clear();
                         self.current_folder = query;
-                        self.load_folder().await?;
+                        match self.load_folder().await {
+                            Ok(()) => debug_log!("IPC Message: loaded {} envelopes", self.envelopes.len()),
+                            Err(e) => debug_log!("IPC Message: load error: {}", e),
+                        }
                         self.set_status(format!("Opened message {}", id));
                     }
                     HuttUrl::Thread(id) => {
-                        // Search for the thread and open thread view
                         let query = format!("msgid:{}", id);
-                        let envelopes = self
+                        debug_log!("IPC Thread: query={}", query);
+                        self.mode = InputMode::Normal;
+                        self.thread_messages.clear();
+                        let result = self
                             .mu
                             .find(&query, &crate::mu_client::FindOpts::default())
-                            .await
-                            .unwrap_or_default();
+                            .await;
+                        debug_log!("IPC Thread: find result: {:?}", result.as_ref().map(|v| v.len()));
+                        let envelopes = result.unwrap_or_default();
                         if let Some(envelope) = envelopes.into_iter().next() {
-                            // Put it in the envelope list so open_thread can find it
                             self.envelopes = vec![envelope];
                             self.selected = 0;
-                            self.open_thread().await?;
+                            match self.open_thread().await {
+                                Ok(()) => debug_log!("IPC Thread: opened, {} messages", self.thread_messages.len()),
+                                Err(e) => debug_log!("IPC Thread: open_thread error: {}", e),
+                            }
                             self.set_status(format!("Opened thread {}", id));
                         } else {
+                            debug_log!("IPC Thread: message not found");
                             self.set_status(format!("Message not found: {}", id));
                         }
                     }
                     HuttUrl::Search(query) => {
+                        debug_log!("IPC Search: query={}", query);
+                        self.mode = InputMode::Normal;
+                        self.thread_messages.clear();
                         self.current_folder = query.clone();
-                        self.load_folder().await?;
+                        match self.load_folder().await {
+                            Ok(()) => debug_log!("IPC Search: loaded {} envelopes", self.envelopes.len()),
+                            Err(e) => debug_log!("IPC Search: load error: {}", e),
+                        }
                         self.set_status(format!("Search: {}", query));
                     }
                     HuttUrl::Compose { to, subject } => {
@@ -604,7 +622,13 @@ impl App {
                 }
             }
             IpcCommand::Navigate { folder } => {
-                self.navigate_folder(&folder).await?;
+                debug_log!("IPC Navigate: folder={}", folder);
+                self.mode = InputMode::Normal;
+                self.thread_messages.clear();
+                match self.navigate_folder(&folder).await {
+                    Ok(()) => debug_log!("IPC Navigate: loaded {} envelopes", self.envelopes.len()),
+                    Err(e) => debug_log!("IPC Navigate: error: {}", e),
+                }
             }
             IpcCommand::Quit => {
                 self.should_quit = true;
