@@ -94,6 +94,8 @@ to open the command palette and fuzzy-search any action.
 | `Shift+Space`  | Scroll preview up         |
 | `Ctrl+d`       | Half page down            |
 | `Ctrl+u`       | Half page up              |
+| `Ctrl+f`       | Full page down            |
+| `Ctrl+b`       | Full page up              |
 
 ### Triage
 
