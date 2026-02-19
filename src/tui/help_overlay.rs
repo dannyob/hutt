@@ -24,6 +24,8 @@ const SECTIONS: &[HelpSection] = &[
             ("Shift+Space", "Scroll preview up"),
             ("Ctrl+d", "Half page down"),
             ("Ctrl+u", "Half page up"),
+            ("Ctrl+f", "Full page down"),
+            ("Ctrl+b", "Full page up"),
         ],
     },
     HelpSection {

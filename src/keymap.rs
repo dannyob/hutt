@@ -21,6 +21,8 @@ pub enum Action {
     ScrollPreviewUp,
     HalfPageDown,
     HalfPageUp,
+    FullPageDown,
+    FullPageUp,
 
     // Triage
     Archive,
@@ -130,6 +132,8 @@ impl KeyMapper {
             (KeyCode::Char(' '), KeyModifiers::SHIFT) => Action::ScrollPreviewUp,
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => Action::HalfPageDown,
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => Action::HalfPageUp,
+            (KeyCode::Char('f'), KeyModifiers::CONTROL) => Action::FullPageDown,
+            (KeyCode::Char('b'), KeyModifiers::CONTROL) => Action::FullPageUp,
 
             // Triage
             (KeyCode::Char('e'), KeyModifiers::NONE) => Action::Archive,

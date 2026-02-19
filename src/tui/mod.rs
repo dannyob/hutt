@@ -549,6 +549,19 @@ impl App {
                 self.selected = self.selected.saturating_sub(10);
                 self.preview_scroll = 0;
             }
+            Action::FullPageDown => {
+                let max = if self.envelopes.is_empty() {
+                    0
+                } else {
+                    self.envelopes.len() - 1
+                };
+                self.selected = (self.selected + 20).min(max);
+                self.preview_scroll = 0;
+            }
+            Action::FullPageUp => {
+                self.selected = self.selected.saturating_sub(20);
+                self.preview_scroll = 0;
+            }
 
             // Triage
             Action::Archive => self.triage_move("/Archive", "Archived").await?,
