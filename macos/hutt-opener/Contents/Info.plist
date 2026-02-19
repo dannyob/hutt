@@ -16,7 +16,7 @@
     <string>APPL</string>
 
     <key>CFBundleExecutable</key>
-    <string>hutt-open.sh</string>
+    <string>applet</string>
 
     <key>CFBundleURLTypes</key>
     <array>
