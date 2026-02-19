@@ -237,19 +237,6 @@ make install-linux-handler
 Installs `hutt-open` to `~/.local/bin/` and registers a `.desktop` file
 with `xdg-mime` as the handler for `x-scheme-handler/hutt`.
 
-### Windows
-
-1. Install Python 3 and ensure `python3` or `python` is on `PATH`.
-2. Copy `windows/hutt-open.ps1` to `%USERPROFILE%\bin\hutt-open.ps1`
-   (or edit the path in the `.reg` file).
-3. Import the registry entries:
-   ```
-   regedit /s windows\hutt-opener.reg
-   ```
-
-Requires Windows 10 1803+ for Unix domain socket support. The Rust
-`socket_path()` would need a Windows-specific branch (not yet
-implemented). **Currently untested** — contributions welcome.
 
 ## Debugging
 
@@ -288,9 +275,6 @@ macos/
 └── hutt-opener/Contents/     .app bundle template (Info.plist + shell script)
 linux/
 └── hutt-opener.desktop       XDG URL scheme registration
-windows/
-├── hutt-opener.reg           Registry entries for hutt:// scheme
-└── hutt-open.ps1             PowerShell URL handler
 tests/
 ├── test-url-handler.sh       Podman-based URL handler test
 └── container-url-test.py     Test harness (runs inside container)
