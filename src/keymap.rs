@@ -7,6 +7,7 @@ pub enum InputMode {
     ThreadView,
     FolderPicker,
     CommandPalette,
+    Help,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +72,9 @@ pub enum Action {
     // Command palette (Phase 4)
     OpenCommandPalette,
 
+    // Help
+    ShowHelp,
+
     // Sync (Phase 4)
     SyncMail,
 
@@ -103,6 +107,7 @@ impl KeyMapper {
                 self.handle_input(key)
             }
             InputMode::ThreadView => self.handle_thread(key),
+            InputMode::Help => self.handle_help(key),
         }
     }
 
@@ -165,6 +170,9 @@ impl KeyMapper {
 
             // Sync
             (KeyCode::Char('r'), KeyModifiers::CONTROL) => Action::SyncMail,
+
+            // Help
+            (KeyCode::Char('?'), _) => Action::ShowHelp,
 
             // Quit
             (KeyCode::Char('q'), KeyModifiers::NONE) => Action::Quit,
@@ -232,8 +240,20 @@ impl KeyMapper {
             (KeyCode::Char('r'), KeyModifiers::NONE) => Action::Reply,
             (KeyCode::Char('a'), KeyModifiers::NONE) => Action::ReplyAll,
             (KeyCode::Char('f'), KeyModifiers::NONE) => Action::Forward,
+            // Help
+            (KeyCode::Char('?'), _) => Action::ShowHelp,
             // Quit
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => Action::Quit,
+            _ => Action::Noop,
+        }
+    }
+
+    fn handle_help(&mut self, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => Action::InputCancel,
+            KeyCode::Char('j') | KeyCode::Down => Action::ScrollPreviewDown,
+            KeyCode::Char('k') | KeyCode::Up => Action::ScrollPreviewUp,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
             _ => Action::Noop,
         }
     }

@@ -67,14 +67,15 @@ impl<'a> BottomBar<'a> {
     fn hints_for_mode(&self) -> &'static str {
         match self.mode {
             InputMode::Normal => {
-                "j/k:nav e:archive #:trash !:spam u:read s:star /:search x:select Enter:thread"
+                "j/k:nav e:archive #:trash s:star /:search Enter:thread ?:help"
             }
             InputMode::Search => "Type to search | Enter:submit Esc:cancel",
             InputMode::ThreadView => {
-                "j/k:nav o:expand O:expand-all e:archive #:trash r:reply q:back"
+                "j/k:nav o:expand e:archive r:reply q:back ?:help"
             }
             InputMode::FolderPicker => "j/k:nav Enter:select Esc:cancel | type to filter",
             InputMode::CommandPalette => "j/k:nav Enter:select Esc:cancel | type to filter",
+            InputMode::Help => "j/k:scroll ?/q/Esc:close",
         }
     }
 }

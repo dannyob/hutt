@@ -1,6 +1,7 @@
 pub mod command_palette;
 pub mod envelope_list;
 pub mod folder_picker;
+pub mod help_overlay;
 pub mod preview;
 pub mod status_bar;
 pub mod thread_view;
@@ -34,6 +35,7 @@ use crate::undo::{UndoEntry, UndoStack};
 use self::command_palette::{CommandPalette, PaletteEntry};
 use self::envelope_list::EnvelopeList;
 use self::folder_picker::FolderPicker;
+use self::help_overlay::HelpOverlay;
 use self::preview::PreviewPane;
 use self::status_bar::{BottomBar, TopBar};
 use self::thread_view::{ThreadMessage, ThreadView};
@@ -84,6 +86,9 @@ pub struct App {
     pub palette_selected: usize,
     pub palette_entries: Vec<PaletteEntry>,
 
+    // Help overlay
+    pub help_scroll: u16,
+
     // Status message (temporary feedback)
     pub status_message: Option<String>,
     pub status_time: Option<Instant>,
@@ -132,6 +137,7 @@ impl App {
             palette_filter: String::new(),
             palette_selected: 0,
             palette_entries: PaletteEntry::all_actions(),
+            help_scroll: 0,
             status_message: None,
             status_time: None,
             compose_pending: None,
@@ -508,20 +514,28 @@ impl App {
                     self.preview_scroll = 0;
                 }
             }
-            Action::ScrollPreviewDown => {
-                if self.mode == InputMode::ThreadView {
+            Action::ScrollPreviewDown => match self.mode {
+                InputMode::ThreadView => {
                     self.thread_scroll = self.thread_scroll.saturating_add(5);
-                } else {
+                }
+                InputMode::Help => {
+                    self.help_scroll = self.help_scroll.saturating_add(3);
+                }
+                _ => {
                     self.preview_scroll = self.preview_scroll.saturating_add(5);
                 }
-            }
-            Action::ScrollPreviewUp => {
-                if self.mode == InputMode::ThreadView {
+            },
+            Action::ScrollPreviewUp => match self.mode {
+                InputMode::ThreadView => {
                     self.thread_scroll = self.thread_scroll.saturating_sub(5);
-                } else {
+                }
+                InputMode::Help => {
+                    self.help_scroll = self.help_scroll.saturating_sub(3);
+                }
+                _ => {
                     self.preview_scroll = self.preview_scroll.saturating_sub(5);
                 }
-            }
+            },
             Action::HalfPageDown => {
                 let max = if self.envelopes.is_empty() {
                     0
@@ -663,6 +677,12 @@ impl App {
                 }
             }
 
+            // Help
+            Action::ShowHelp => {
+                self.help_scroll = 0;
+                self.mode = InputMode::Help;
+            }
+
             // Command palette
             Action::OpenCommandPalette => {
                 self.palette_filter.clear();
@@ -743,6 +763,9 @@ impl App {
                     }
                 }
                 InputMode::FolderPicker | InputMode::CommandPalette => {
+                    self.mode = InputMode::Normal;
+                }
+                InputMode::Help => {
                     self.mode = InputMode::Normal;
                 }
                 _ => {}
@@ -890,6 +913,12 @@ pub async fn run(mut app: App) -> Result<()> {
                     selected: app.palette_selected,
                 };
                 frame.render_widget(palette, size);
+            }
+            if app.mode == InputMode::Help {
+                let help = HelpOverlay {
+                    scroll: app.help_scroll,
+                };
+                frame.render_widget(help, size);
             }
         })?;
 

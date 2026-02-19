@@ -252,6 +252,13 @@ impl PaletteEntry {
                 shortcut: Some("Ctrl+r".into()),
                 action: Action::SyncMail,
             },
+            // Help
+            PaletteEntry {
+                name: "Help".into(),
+                description: "Show keyboard shortcuts".into(),
+                shortcut: Some("?".into()),
+                action: Action::ShowHelp,
+            },
             // System
             PaletteEntry {
                 name: "Quit".into(),
