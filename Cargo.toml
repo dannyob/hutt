@@ -10,6 +10,7 @@ anyhow = "1"
 arboard = "3"
 chrono = { version = "0.4", features = ["serde"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
+futures = "0.3"
 html2text = "0.16"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls-tls", "builder", "hostname"] }
 libc = "0.2"

@@ -7,13 +7,15 @@ pub mod status_bar;
 pub mod thread_view;
 
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyEventKind},
+    event::{Event, EventStream, KeyEventKind},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
+use futures::StreamExt;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     Terminal,
@@ -26,7 +28,7 @@ use crate::compose;
 use crate::config::Config;
 use crate::envelope::{flags_from_string, Envelope};
 use crate::keymap::{Action, InputMode, KeyMapper};
-use crate::links;
+use crate::links::{self, HuttUrl, IpcCommand, IpcListener};
 use crate::mime_render::{self, RenderCache};
 use crate::mu_client::{FindOpts, MuClient};
 use crate::send;
@@ -39,6 +41,29 @@ use self::help_overlay::HelpOverlay;
 use self::preview::PreviewPane;
 use self::status_bar::{BottomBar, TopBar};
 use self::thread_view::{ThreadMessage, ThreadView};
+
+/// Write a debug line to the file at $HUTT_LOG (if set).
+/// Usage: `debug_log!("IPC received: {:?}", cmd);`
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        if let Some(path) = debug_log_path() {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                use std::io::Write;
+                let _ = writeln!(f, "{}", format_args!($($arg)*));
+            }
+        }
+    };
+}
+
+fn debug_log_path() -> Option<&'static str> {
+    static PATH: OnceLock<Option<String>> = OnceLock::new();
+    PATH.get_or_init(|| std::env::var("HUTT_LOG").ok())
+        .as_deref()
+}
 
 pub struct App {
     // Core state
@@ -528,6 +553,66 @@ impl App {
             .collect()
     }
 
+    // ── IPC command handling ──────────────────────────────────────────
+
+    async fn handle_ipc_command(&mut self, cmd: IpcCommand) -> Result<()> {
+        match cmd {
+            IpcCommand::Open(url_serde) => {
+                let url: HuttUrl = url_serde.into();
+                match url {
+                    HuttUrl::Message(id) => {
+                        // Search for the message and select it
+                        let query = format!("msgid:{}", id);
+                        self.current_folder = query;
+                        self.load_folder().await?;
+                        self.set_status(format!("Opened message {}", id));
+                    }
+                    HuttUrl::Thread(id) => {
+                        // Search for the thread and open thread view
+                        let query = format!("msgid:{}", id);
+                        let envelopes = self
+                            .mu
+                            .find(&query, &crate::mu_client::FindOpts::default())
+                            .await
+                            .unwrap_or_default();
+                        if let Some(envelope) = envelopes.into_iter().next() {
+                            // Put it in the envelope list so open_thread can find it
+                            self.envelopes = vec![envelope];
+                            self.selected = 0;
+                            self.open_thread().await?;
+                            self.set_status(format!("Opened thread {}", id));
+                        } else {
+                            self.set_status(format!("Message not found: {}", id));
+                        }
+                    }
+                    HuttUrl::Search(query) => {
+                        self.current_folder = query.clone();
+                        self.load_folder().await?;
+                        self.set_status(format!("Search: {}", query));
+                    }
+                    HuttUrl::Compose { to, subject } => {
+                        let mut ctx = compose::ComposeContext::new_message();
+                        ctx.to = vec![crate::envelope::Address {
+                            name: None,
+                            email: to,
+                        }];
+                        ctx.subject = subject;
+                        self.compose_pending =
+                            Some(compose::ComposeKind::NewMessage);
+                        self.set_status("Compose from URL");
+                    }
+                }
+            }
+            IpcCommand::Navigate { folder } => {
+                self.navigate_folder(&folder).await?;
+            }
+            IpcCommand::Quit => {
+                self.should_quit = true;
+            }
+        }
+        Ok(())
+    }
+
     // ── Action dispatch ─────────────────────────────────────────────
 
     async fn handle_action(&mut self, action: Action) -> Result<()> {
@@ -826,6 +911,37 @@ impl App {
 pub async fn run(mut app: App) -> Result<()> {
     app.load_folder().await?;
 
+    // Start IPC listener as a background task, sending commands through a channel
+    let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<IpcCommand>();
+    let _ipc_guard = match IpcListener::bind() {
+        Ok(listener) => {
+            let tx = ipc_tx;
+            Some(tokio::spawn(async move {
+                debug_log!("IPC listener started");
+                loop {
+                    match listener.accept().await {
+                        Ok(cmd) => {
+                            debug_log!("IPC accepted: {:?}", cmd);
+                            if tx.send(cmd).is_err() {
+                                debug_log!("IPC channel closed, exiting");
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            debug_log!("IPC accept error: {}", e);
+                            continue;
+                        }
+                    }
+                }
+            }))
+        }
+        Err(e) => {
+            eprintln!("IPC socket: {}", e);
+            drop(ipc_tx); // drop sender so receiver never blocks
+            None
+        }
+    };
+
     terminal::enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
     let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
@@ -834,6 +950,7 @@ pub async fn run(mut app: App) -> Result<()> {
 
     let sequence_timeout = Duration::from_millis(1000);
     let mut last_key_time = Instant::now();
+    let mut event_stream = EventStream::new();
 
     loop {
         app.clear_stale_status();
@@ -1034,48 +1151,69 @@ pub async fn run(mut app: App) -> Result<()> {
             Duration::from_millis(100)
         };
 
-        if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                last_key_time = Instant::now();
+        // Drain any pending IPC commands before blocking on input
+        while let Ok(cmd) = ipc_rx.try_recv() {
+            debug_log!("IPC drain: {:?}", cmd);
+            if let Err(e) = app.handle_ipc_command(cmd).await {
+                app.set_status(format!("IPC error: {}", e));
+            }
+        }
 
-                // In popup modes, handle arrow keys for navigation before passing to keymap
-                match app.mode {
-                    InputMode::FolderPicker => {
-                        if key.code == crossterm::event::KeyCode::Down {
-                            let max = app.filtered_folders().len();
-                            if app.folder_selected + 1 < max {
-                                app.folder_selected += 1;
-                            }
-                            continue;
-                        }
-                        if key.code == crossterm::event::KeyCode::Up {
-                            app.folder_selected = app.folder_selected.saturating_sub(1);
-                            continue;
-                        }
+        // Multiplex keyboard events and IPC commands
+        let event = tokio::select! {
+            ev = event_stream.next() => ev.and_then(|r| r.ok()),
+            cmd = ipc_rx.recv() => {
+                if let Some(cmd) = cmd {
+                    debug_log!("IPC select: {:?}", cmd);
+                    if let Err(e) = app.handle_ipc_command(cmd).await {
+                        app.set_status(format!("IPC error: {}", e));
                     }
-                    InputMode::CommandPalette => {
-                        if key.code == crossterm::event::KeyCode::Down {
-                            let max = app.filtered_palette().len();
-                            if app.palette_selected + 1 < max {
-                                app.palette_selected += 1;
-                            }
-                            continue;
-                        }
-                        if key.code == crossterm::event::KeyCode::Up {
-                            app.palette_selected = app.palette_selected.saturating_sub(1);
-                            continue;
-                        }
-                    }
-                    _ => {}
                 }
+                continue;
+            }
+            _ = tokio::time::sleep(timeout) => None,
+        };
 
-                let action = app.keymap.handle(key, &app.mode);
-                if let Err(e) = app.handle_action(action).await {
-                    app.set_status(format!("Error: {}", e));
+        if let Some(Event::Key(key)) = event {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            last_key_time = Instant::now();
+
+            // In popup modes, handle arrow keys for navigation before passing to keymap
+            match app.mode {
+                InputMode::FolderPicker => {
+                    if key.code == crossterm::event::KeyCode::Down {
+                        let max = app.filtered_folders().len();
+                        if app.folder_selected + 1 < max {
+                            app.folder_selected += 1;
+                        }
+                        continue;
+                    }
+                    if key.code == crossterm::event::KeyCode::Up {
+                        app.folder_selected = app.folder_selected.saturating_sub(1);
+                        continue;
+                    }
                 }
+                InputMode::CommandPalette => {
+                    if key.code == crossterm::event::KeyCode::Down {
+                        let max = app.filtered_palette().len();
+                        if app.palette_selected + 1 < max {
+                            app.palette_selected += 1;
+                        }
+                        continue;
+                    }
+                    if key.code == crossterm::event::KeyCode::Up {
+                        app.palette_selected = app.palette_selected.saturating_sub(1);
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+
+            let action = app.keymap.handle(key, &app.mode);
+            if let Err(e) = app.handle_action(action).await {
+                app.set_status(format!("Error: {}", e));
             }
         }
     }

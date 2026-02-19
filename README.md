@@ -209,11 +209,20 @@ To register the `hutt://` URL scheme on macOS:
 
 ```sh
 cp -r macos/hutt-opener ~/Applications/"Hutt Opener.app"
-open ~/Applications/"Hutt Opener.app"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f ~/Applications/"Hutt Opener.app"
 ```
 
 This allows clicking `hutt://message/<id>` links to open the corresponding
-message in a running hutt instance.
+message in a running hutt instance. hutt must be running (it listens on a
+Unix domain socket at `/tmp/hutt-<uid>.sock`).
+
+## Debugging
+
+Set `HUTT_LOG` to a file path for debug output:
+
+```sh
+HUTT_LOG=/tmp/hutt.log hutt
+```
 
 ## Architecture
 
