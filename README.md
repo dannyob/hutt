@@ -203,21 +203,53 @@ The plugin provides:
 - `:HuttDiscard` / `<leader>d` to cancel
 - Contact completion via `mu cfind` on To/Cc/Bcc lines (Ctrl+x Ctrl+o)
 
-## macOS URL Scheme
+## URL Scheme
 
-To register the `hutt://` URL scheme on macOS:
+hutt registers a `hutt://` URL scheme so you can open messages, threads,
+searches, and compose windows from outside the TUI. hutt must be running
+(it listens on a Unix domain socket at `$XDG_RUNTIME_DIR/hutt.sock` or
+`/tmp/hutt-<uid>.sock`).
+
+Supported URLs:
+
+| URL                                     | Action                  |
+|-----------------------------------------|-------------------------|
+| `hutt://message/<message-id>`           | Open a message          |
+| `hutt://thread/<message-id>`            | Open a thread           |
+| `hutt://search/<url-encoded-query>`     | Run a search            |
+| `hutt://compose?to=<addr>&subject=<s>`  | Open compose            |
+
+### macOS
 
 ```sh
 make install-macos-handler
 ```
 
-This uses `osacompile` to build an AppleScript applet that can receive macOS
-URL open events, bundles it with the IPC shell script, and registers the
-`hutt://` scheme with Launch Services.
+Uses `osacompile` to build an AppleScript applet that receives macOS URL
+open events and delegates to the bundled IPC shell script.
 
-This allows clicking `hutt://message/<id>` links to open the corresponding
-message in a running hutt instance. hutt must be running (it listens on a
-Unix domain socket at `/tmp/hutt-<uid>.sock`).
+### Linux (freedesktop / GNOME / KDE)
+
+```sh
+make install-linux-handler
+```
+
+Installs `hutt-open` to `~/.local/bin/` and registers a `.desktop` file
+with `xdg-mime` as the handler for `x-scheme-handler/hutt`.
+
+### Windows
+
+1. Install Python 3 and ensure `python3` or `python` is on `PATH`.
+2. Copy `windows/hutt-open.ps1` to `%USERPROFILE%\bin\hutt-open.ps1`
+   (or edit the path in the `.reg` file).
+3. Import the registry entries:
+   ```
+   regedit /s windows\hutt-opener.reg
+   ```
+
+Requires Windows 10 1803+ for Unix domain socket support. The Rust
+`socket_path()` would need a Windows-specific branch (not yet
+implemented).
 
 ## Debugging
 
@@ -251,6 +283,17 @@ src/
     ├── folder_picker.rs  Folder picker popup
     ├── command_palette.rs Command palette popup
     └── help_overlay.rs   Keyboard shortcut reference
+macos/
+├── hutt-opener.applescript   AppleScript URL event handler
+└── hutt-opener/Contents/     .app bundle template (Info.plist + shell script)
+linux/
+└── hutt-opener.desktop       XDG URL scheme registration
+windows/
+├── hutt-opener.reg           Registry entries for hutt:// scheme
+└── hutt-open.ps1             PowerShell URL handler
+tests/
+├── test-url-handler.sh       Podman-based URL handler test
+└── container-url-test.py     Test harness (runs inside container)
 ```
 
 ## License

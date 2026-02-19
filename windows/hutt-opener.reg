@@ -1,0 +1,23 @@
+Windows Registry Editor Version 5.00
+
+; Register the hutt:// URL scheme on Windows.
+;
+; Before importing, edit the path in [shell\open\command] to point to
+; your actual hutt-open.ps1 location.
+;
+; Import with:  regedit /s hutt-opener.reg
+; Or double-click this file in Explorer.
+
+[HKEY_CURRENT_USER\Software\Classes\hutt]
+@="URL:Hutt Protocol"
+"URL Protocol"=""
+
+[HKEY_CURRENT_USER\Software\Classes\hutt\DefaultIcon]
+@=""
+
+[HKEY_CURRENT_USER\Software\Classes\hutt\shell]
+
+[HKEY_CURRENT_USER\Software\Classes\hutt\shell\open]
+
+[HKEY_CURRENT_USER\Software\Classes\hutt\shell\open\command]
+@="powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%USERPROFILE%\\bin\\hutt-open.ps1\" \"%1\""

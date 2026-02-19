@@ -1,6 +1,7 @@
 PREFIX ?= ~/.local
 
-.PHONY: build install install-macos-handler check test clippy clean
+.PHONY: build install install-macos-handler install-linux-handler \
+        check test test-url-handler clippy clean
 
 build:
 	cargo build --release
@@ -18,11 +19,20 @@ install-macos-handler:
 	/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f ~/Applications/"Hutt Opener.app"
 	@echo "Registered hutt:// URL scheme."
 
+install-linux-handler:
+	install -Dm755 macos/hutt-opener/Contents/MacOS/hutt-open.sh $(PREFIX)/bin/hutt-open
+	install -Dm644 linux/hutt-opener.desktop ~/.local/share/applications/hutt-opener.desktop
+	xdg-mime default hutt-opener.desktop x-scheme-handler/hutt
+	@echo "Registered hutt:// URL scheme."
+
 check:
 	cargo check
 
 test:
 	cargo test
+
+test-url-handler:
+	bash tests/test-url-handler.sh
 
 clippy:
 	cargo clippy -- -W clippy::all
