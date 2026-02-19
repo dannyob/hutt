@@ -6,10 +6,14 @@ use ratatui::{
     widgets::Widget,
 };
 
+use crate::keymap::InputMode;
+
 pub struct TopBar<'a> {
     pub folder: &'a str,
     pub unread_count: usize,
     pub total_count: usize,
+    pub mode: &'a InputMode,
+    pub thread_subject: Option<&'a str>,
 }
 
 impl<'a> Widget for TopBar<'a> {
@@ -17,25 +21,29 @@ impl<'a> Widget for TopBar<'a> {
         let style = Style::default().bg(Color::DarkGray).fg(Color::White);
         buf.set_style(area, style);
 
-        let left = format!(" {} ", self.folder);
+        let left = match self.mode {
+            InputMode::ThreadView => {
+                let subj = self.thread_subject.unwrap_or("Thread");
+                format!(" {} ", subj)
+            }
+            _ => format!(" {} ", self.folder),
+        };
+
         let right = if self.unread_count > 0 {
             format!(" {}/{} unread ", self.unread_count, self.total_count)
         } else {
             format!(" {} messages ", self.total_count)
         };
 
-        // Render left-aligned folder name
-        let left_spans = Line::from(vec![
-            Span::styled(
-                &left,
-                Style::default()
-                    .bg(Color::Blue)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]);
-        let x = area.x;
-        buf.set_line(x, area.y, &left_spans, area.width);
+        // Render left-aligned label
+        let left_spans = Line::from(vec![Span::styled(
+            &left,
+            Style::default()
+                .bg(Color::Blue)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )]);
+        buf.set_line(area.x, area.y, &left_spans, area.width);
 
         // Render right-aligned count
         let right_len = right.len() as u16;
@@ -47,8 +55,28 @@ impl<'a> Widget for TopBar<'a> {
 }
 
 pub struct BottomBar<'a> {
-    pub hints: &'a str,
+    pub mode: &'a InputMode,
     pub pending_key: Option<&'a str>,
+    pub search_input: Option<&'a str>,
+    pub status_message: Option<&'a str>,
+    pub filter_desc: Option<&'a str>,
+    pub selection_count: usize,
+}
+
+impl<'a> BottomBar<'a> {
+    fn hints_for_mode(&self) -> &'static str {
+        match self.mode {
+            InputMode::Normal => {
+                "j/k:nav e:archive #:trash !:spam u:read s:star /:search x:select Enter:thread"
+            }
+            InputMode::Search => "Type to search | Enter:submit Esc:cancel",
+            InputMode::ThreadView => {
+                "j/k:nav o:expand O:expand-all e:archive #:trash r:reply q:back"
+            }
+            InputMode::FolderPicker => "j/k:nav Enter:select Esc:cancel | type to filter",
+            InputMode::CommandPalette => "j/k:nav Enter:select Esc:cancel | type to filter",
+        }
+    }
 }
 
 impl<'a> Widget for BottomBar<'a> {
@@ -56,11 +84,50 @@ impl<'a> Widget for BottomBar<'a> {
         let style = Style::default().bg(Color::DarkGray).fg(Color::White);
         buf.set_style(area, style);
 
-        let text = if let Some(pending) = self.pending_key {
-            format!(" {}… | {}", pending, self.hints)
-        } else {
-            format!(" {}", self.hints)
-        };
+        // Priority: search input > status message > normal hints
+        if let Some(search) = self.search_input {
+            let search_style = Style::default()
+                .bg(Color::DarkGray)
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD);
+            let prompt = " /";
+            buf.set_string(area.x, area.y, prompt, search_style);
+            buf.set_string(area.x + prompt.len() as u16, area.y, search, style);
+            // Cursor indicator
+            let cursor_x = area.x + prompt.len() as u16 + search.len() as u16;
+            if cursor_x < area.x + area.width {
+                buf.set_string(
+                    cursor_x,
+                    area.y,
+                    "_",
+                    Style::default()
+                        .bg(Color::DarkGray)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::SLOW_BLINK),
+                );
+            }
+            return;
+        }
+
+        let mut text = String::new();
+
+        if let Some(status) = self.status_message {
+            text.push_str(&format!(" {} | ", status));
+        }
+
+        if self.selection_count > 0 {
+            text.push_str(&format!(" [{} selected] ", self.selection_count));
+        }
+
+        if let Some(filter) = self.filter_desc {
+            text.push_str(&format!(" [{}] ", filter));
+        }
+
+        if let Some(pending) = self.pending_key {
+            text.push_str(&format!(" {}... | ", pending));
+        }
+
+        text.push_str(&format!(" {}", self.hints_for_mode()));
 
         buf.set_string(area.x, area.y, &text, style);
     }

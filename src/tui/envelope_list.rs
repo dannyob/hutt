@@ -4,6 +4,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::Widget,
 };
+use std::collections::HashSet;
 
 use crate::envelope::Envelope;
 
@@ -11,11 +12,17 @@ pub struct EnvelopeList<'a> {
     pub envelopes: &'a [Envelope],
     pub selected: usize,
     pub offset: usize,
+    pub multi_selected: &'a HashSet<u32>,
 }
 
 impl<'a> EnvelopeList<'a> {
     /// Calculate the visible range for scrolling.
-    pub fn visible_range(selected: usize, offset: usize, height: usize, total: usize) -> (usize, usize) {
+    pub fn visible_range(
+        selected: usize,
+        offset: usize,
+        height: usize,
+        total: usize,
+    ) -> (usize, usize) {
         let mut off = offset;
         if selected < off {
             off = selected;
@@ -42,11 +49,14 @@ impl<'a> Widget for EnvelopeList<'a> {
         }
 
         let height = area.height as usize;
-        let (start, end) = Self::visible_range(self.selected, self.offset, height, self.envelopes.len());
+        let (start, end) =
+            Self::visible_range(self.selected, self.offset, height, self.envelopes.len());
 
         for (i, envelope) in self.envelopes[start..end].iter().enumerate() {
             let y = area.y + i as u16;
-            let is_selected = start + i == self.selected;
+            let idx = start + i;
+            let is_selected = idx == self.selected;
+            let is_multi = self.multi_selected.contains(&envelope.docid);
             let is_unread = envelope.is_unread();
             let is_flagged = envelope.is_flagged();
 
@@ -57,22 +67,23 @@ impl<'a> Widget for EnvelopeList<'a> {
             };
 
             // Fill the line with background
-            buf.set_style(
-                Rect::new(area.x, y, area.width, 1),
-                base_style,
-            );
+            buf.set_style(Rect::new(area.x, y, area.width, 1), base_style);
 
             let w = area.width as usize;
 
-            // Unread/flag indicator (2 chars)
-            let indicator = if is_flagged {
+            // Multi-select / unread / flag indicator (2 chars)
+            let indicator = if is_multi {
+                "x "
+            } else if is_flagged {
                 "* "
             } else if is_unread {
                 "> "
             } else {
                 "  "
             };
-            let ind_style = if is_flagged {
+            let ind_style = if is_multi {
+                base_style.fg(Color::Green).add_modifier(Modifier::BOLD)
+            } else if is_flagged {
                 base_style.fg(Color::Yellow)
             } else if is_unread {
                 base_style.fg(Color::Cyan).add_modifier(Modifier::BOLD)
@@ -120,20 +131,19 @@ impl<'a> Widget for EnvelopeList<'a> {
     }
 }
 
-/// Truncate a string to fit within `max_width` characters, adding "…" if needed.
+/// Truncate a string to fit within `max_width` characters, adding "..." if needed.
 fn truncate_str(s: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
-    // Simple char-count truncation (good enough for ASCII-heavy email)
     let chars: Vec<char> = s.chars().collect();
     if chars.len() <= max_width {
         s.to_string()
     } else if max_width <= 1 {
-        "…".to_string()
+        "~".to_string()
     } else {
         let mut result: String = chars[..max_width - 1].iter().collect();
-        result.push('…');
+        result.push('~');
         result
     }
 }
