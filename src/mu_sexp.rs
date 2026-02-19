@@ -109,7 +109,7 @@ pub fn plist_get_bool(plist: &Value, key: &str) -> Option<bool> {
                 if let Some(val) = iter.next() {
                     let car = val.car();
                     if car.is_symbol() {
-                        return Some(car.as_symbol().map_or(false, |s| s == "t"));
+                        return Some(car.as_symbol() == Some("t"));
                     }
                     return Some(!car.is_nil());
                 }
@@ -209,7 +209,7 @@ pub fn parse_envelope(value: &Value) -> Result<Envelope> {
 
     let date = plist_get(value, "date")
         .and_then(parse_emacs_time)
-        .unwrap_or_else(|| Utc::now());
+        .unwrap_or_else(Utc::now);
 
     let from = plist_get(value, "from")
         .map(parse_addresses)

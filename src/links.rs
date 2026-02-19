@@ -309,15 +309,14 @@ pub fn install_macos_handler() -> Result<()> {
     // The script determines the socket path using the same logic as Rust,
     // constructs a JSON IPC command, and sends it via socat or a simple
     // /dev/unix pipe.
-    let script = format!(
-        r#"#!/bin/bash
+    let script = r#"#!/bin/bash
 # Hutt URL handler — forwards hutt:// URLs to the running instance.
 URL="$1"
 if [ -z "$URL" ]; then
     exit 0
 fi
 
-SOCK="${{XDG_RUNTIME_DIR:-/tmp/hutt-$(id -u).sock}}/hutt.sock"
+SOCK="${XDG_RUNTIME_DIR:-/tmp/hutt-$(id -u).sock}/hutt.sock"
 # Fallback: if XDG_RUNTIME_DIR was not set, the socket is at /tmp/hutt-<uid>.sock
 if [ ! -S "$SOCK" ]; then
     SOCK="/tmp/hutt-$(id -u).sock"
@@ -330,7 +329,7 @@ fi
 ESCAPED=$(printf '%s' "$URL" | sed 's/\\/\\\\/g; s/"/\\"/g')
 
 JSON=$(cat <<EOF
-{{"type":"Open","kind":"Message","id":"$ESCAPED"}}
+{"type":"Open","kind":"Message","id":"$ESCAPED"}
 EOF
 )
 
@@ -346,21 +345,20 @@ s.connect('$SOCK')
 url = '$URL'
 if url.startswith('hutt://message/'):
     mid = url[len('hutt://message/'):]
-    cmd = json.dumps({{'type': 'Open', 'kind': 'Message', 'id': mid}})
+    cmd = json.dumps({'type': 'Open', 'kind': 'Message', 'id': mid})
 elif url.startswith('hutt://thread/'):
     mid = url[len('hutt://thread/'):]
-    cmd = json.dumps({{'type': 'Open', 'kind': 'Thread', 'id': mid}})
+    cmd = json.dumps({'type': 'Open', 'kind': 'Thread', 'id': mid})
 elif url.startswith('hutt://search/'):
     q = url[len('hutt://search/'):]
-    cmd = json.dumps({{'type': 'Open', 'kind': 'Search', 'query': q}})
+    cmd = json.dumps({'type': 'Open', 'kind': 'Search', 'query': q})
 else:
-    cmd = json.dumps({{'type': 'Open', 'kind': 'Message', 'id': url}})
+    cmd = json.dumps({'type': 'Open', 'kind': 'Message', 'id': url})
 s.sendall(cmd.encode())
 s.close()
 "
 fi
-"#
-    );
+"#.to_string();
 
     let script_path = macos_dir.join("hutt-open");
     std::fs::write(&script_path, script)

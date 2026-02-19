@@ -140,7 +140,7 @@ fn format_address(addr: &Address) -> String {
 fn format_address_list(addrs: &[Address]) -> String {
     addrs
         .iter()
-        .map(|a| format_address(a))
+        .map(format_address)
         .collect::<Vec<_>>()
         .join(", ")
 }
