@@ -70,6 +70,18 @@ impl PaletteEntry {
                 shortcut: Some("Ctrl+u".into()),
                 action: Action::HalfPageUp,
             },
+            PaletteEntry {
+                name: "Full Page Down".into(),
+                description: "Move a full page down".into(),
+                shortcut: Some("Ctrl+f".into()),
+                action: Action::FullPageDown,
+            },
+            PaletteEntry {
+                name: "Full Page Up".into(),
+                description: "Move a full page up".into(),
+                shortcut: Some("Ctrl+b".into()),
+                action: Action::FullPageUp,
+            },
             // Triage
             PaletteEntry {
                 name: "Archive".into(),
