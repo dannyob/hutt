@@ -24,13 +24,19 @@ editor = "nvim"
 # ---------------------------------------------------------------------------
 # Accounts
 # ---------------------------------------------------------------------------
-# You can define multiple [[accounts]] sections.  The first account is used
-# as the default "From" address when composing new messages.
+# You can define multiple [[accounts]] sections.
+# The account with `default = true` is selected at startup (otherwise the
+# first account). Switch accounts at runtime with g-Tab / g-Shift+Tab.
+#
+# Each account gets its own mu database, smart folders, and sync command.
 
 [[accounts]]
 name     = "Work"
 email    = "you@example.com"
 maildir  = "~/Maildir/work"       # root of the Maildir tree for this account
+# default = true                  # make this the starting account
+# muhome = "~/.cache/mu/work"     # mu database dir (auto-derived if omitted)
+# sync_command = "mbsync work"    # per-account sync (overrides global)
 
 # --- SMTP ---
 [accounts.smtp]
@@ -67,6 +73,7 @@ spam    = "/Junk"
 # name     = "Personal"
 # email    = "me@personal.example"
 # maildir  = "~/Maildir/personal"
+# sync_command = "mbsync personal"
 #
 # [accounts.smtp]
 # host             = "smtp.personal.example"
@@ -113,8 +120,9 @@ Anytown, CA 90210
 # Smart folders are named mu search queries that appear alongside maildir
 # folders in the folder picker and Tab cycling.
 #
-# They are stored in a SEPARATE file:
-#   $XDG_CONFIG_HOME/hutt/smart_folders.toml
+# They are stored in SEPARATE per-account files:
+#   $XDG_CONFIG_HOME/hutt/smart_folders.<account_name>.toml
+# (The plain smart_folders.toml is used as fallback for the first account.)
 #
 # You can also create/delete them interactively:
 #   - Open folder picker (g l), select "+ New smart folder"
@@ -156,7 +164,8 @@ Anytown, CA 90210
 # [bindings] entries apply to both normal and thread view modes.
 # [bindings.normal] and [bindings.thread] override per-mode.
 #
-# Action names: archive, trash, spam, move (open folder picker),
+# Action names: next_account, prev_account,
+#   archive, trash, spam, move (open folder picker),
 #   toggle_read, toggle_star, undo, move_down, move_up, jump_top,
 #   jump_bottom, scroll_preview_down, scroll_preview_up,
 #   half_page_down, half_page_up, full_page_down, full_page_up,
@@ -225,6 +234,10 @@ Anytown, CA 90210
 # "g !"     = "go_spam"
 # "g l"     = "go_folder_picker"
 # Tab / Shift+Tab also cycle folders (not rebindable)
+#
+# Account switching (multi-account only)
+# "g tab"   = "next_account"
+# "g shift+tab" = "prev_account"
 #
 # Thread & preview
 # enter     = "open_thread"

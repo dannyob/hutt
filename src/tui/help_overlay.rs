@@ -95,6 +95,13 @@ const SECTIONS: &[HelpSection] = &[
         ],
     },
     HelpSection {
+        title: "Accounts",
+        keys: &[
+            ("g Tab", "Next account"),
+            ("g Shift+Tab", "Previous account"),
+        ],
+    },
+    HelpSection {
         title: "Other",
         keys: &[
             ("Ctrl+k", "Command palette"),
