@@ -30,6 +30,11 @@ async fn main() -> Result<()> {
     let default_idx = config.default_account_index();
     let muhome = config.effective_muhome(default_idx);
 
+    // Ensure mu database exists (auto-init for new accounts)
+    if let Some(account) = config.accounts.get(default_idx) {
+        mu_client::ensure_mu_database(muhome.as_deref(), &account.maildir).await?;
+    }
+
     // Start mu server
     let mu = mu_client::MuClient::start(muhome.as_deref()).await?;
     let mut app = tui::App::new(mu, config).await?;
