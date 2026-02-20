@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
 
-use crate::envelope::{Address, Envelope};
+use crate::envelope::Envelope;
 use crate::links;
 
 pub struct PreviewPane<'a> {
