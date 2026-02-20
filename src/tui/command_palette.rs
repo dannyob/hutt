@@ -162,6 +162,19 @@ impl PaletteEntry {
                 shortcut: Some("gl".into()),
                 action: Action::GoFolderPicker,
             },
+            // Account switching
+            PaletteEntry {
+                name: "Next Account".into(),
+                description: "Switch to the next account".into(),
+                shortcut: Some("g Tab".into()),
+                action: Action::NextAccount,
+            },
+            PaletteEntry {
+                name: "Previous Account".into(),
+                description: "Switch to the previous account".into(),
+                shortcut: Some("g S+Tab".into()),
+                action: Action::PrevAccount,
+            },
             // Search & Filters
             PaletteEntry {
                 name: "Search".into(),
