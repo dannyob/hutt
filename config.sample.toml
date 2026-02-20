@@ -138,13 +138,89 @@ Anytown, CA 90210
 #   command_palette, help, sync, quit
 
 [bindings]
+# Examples:
 # G = { shell = "mbsync -a", reindex = true }   # sync mail with G
 # "ctrl+t" = { shell = "tig", suspend = true }  # open tig (suspends TUI)
 # "g s" = "/Sent"                                # g then s → go to Sent
 # A = "archive"                                  # remap archive to A
 
+# ─── Default bindings (normal mode) ───────────────────────────────
+# Uncomment and change any of these to override the defaults.
+#
+# Navigation
+# j         = "move_down"
+# k         = "move_up"
+# "g g"     = "jump_top"
+# G         = "jump_bottom"
+# space     = "scroll_preview_down"
+# "shift+space" = "scroll_preview_up"
+# "ctrl+d"  = "half_page_down"
+# "ctrl+u"  = "half_page_up"
+# "ctrl+f"  = "full_page_down"
+# "ctrl+b"  = "full_page_up"
+#
+# Triage
+# e         = "archive"
+# "#"       = "trash"
+# "!"       = "spam"
+# u         = "toggle_read"
+# s         = "toggle_star"
+# z         = "undo"
+#
+# Multi-select
+# x         = "toggle_select"
+# J         = "select_down"
+# K         = "select_up"
+#
+# Search & filters
+# "/"       = "search"
+# U         = "filter_unread"
+# S         = "filter_starred"
+# R         = "filter_needs_reply"
+#
+# Folders (g-prefix sequences)
+# "g i"     = "go_inbox"
+# "g a"     = "go_archive"
+# "g d"     = "go_drafts"
+# "g t"     = "go_sent"
+# "g #"     = "go_trash"
+# "g !"     = "go_spam"
+# "g l"     = "go_folder_picker"
+# Tab / Shift+Tab also cycle folders (not rebindable)
+#
+# Thread & preview
+# enter     = "open_thread"
+#
+# Compose
+# c         = "compose"
+# r         = "reply"
+# a         = "reply_all"
+# f         = "forward"
+#
+# Linkability
+# y         = "copy_message_url"
+# Y         = "copy_thread_url"
+# "ctrl+o"  = "open_in_browser"
+#
+# Other
+# "ctrl+k"  = "command_palette"
+# "ctrl+r"  = "sync"
+# "?"       = "help"
+# q         = "quit"
+
+# ─── Default bindings (thread view only) ──────────────────────────
+# These apply only inside the thread view.  Triage keys (e, #, !,
+# u, s, z) and compose keys (r, a, f) also work in thread view.
+#
+# [bindings.thread]
+# q         = "close_thread"
+# j         = "thread_next"
+# k         = "thread_prev"
+# o         = "thread_toggle_expand"
+# O         = "thread_expand_all"
+# space     = "scroll_preview_down"
+# "shift+space" = "scroll_preview_up"
+
+# ─── Normal-mode-only overrides ───────────────────────────────────
 # [bindings.normal]
 # o = "open_thread"
-
-# [bindings.thread]
-# o = "thread_toggle_expand"
