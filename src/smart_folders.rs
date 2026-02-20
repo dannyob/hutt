@@ -13,37 +13,58 @@ struct SmartFoldersFile {
     folders: Vec<SmartFolder>,
 }
 
-/// Return the path to `smart_folders.toml`, using the same XDG logic as config.rs.
-pub fn smart_folders_path() -> PathBuf {
+/// Return the config directory for hutt.
+fn config_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        PathBuf::from(xdg).join("hutt").join("smart_folders.toml")
+        PathBuf::from(xdg).join("hutt")
     } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home)
-            .join(".config")
-            .join("hutt")
-            .join("smart_folders.toml")
+        PathBuf::from(home).join(".config").join("hutt")
     } else {
-        PathBuf::from("smart_folders.toml")
+        PathBuf::from(".")
     }
 }
 
-/// Load smart folders from disk. Returns empty vec if file is missing or invalid.
-pub fn load_smart_folders() -> Vec<SmartFolder> {
-    let path = smart_folders_path();
-    let contents = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let file: SmartFoldersFile = match toml::from_str(&contents) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-    file.folders
+/// Return the path to smart_folders file for a given account name.
+///
+/// Per-account files: `smart_folders.<account_name>.toml`
+/// For backward compatibility, if `account_name` is empty the plain
+/// `smart_folders.toml` is used. Also, when loading per-account files,
+/// the plain file is used as fallback if the per-account one doesn't exist
+/// and the account is the first one.
+pub fn smart_folders_path(account_name: &str) -> PathBuf {
+    let dir = config_dir();
+    if account_name.is_empty() {
+        dir.join("smart_folders.toml")
+    } else {
+        dir.join(format!("smart_folders.{}.toml", account_name))
+    }
 }
 
-/// Save smart folders to disk. Creates parent directories if needed.
-pub fn save_smart_folders(folders: &[SmartFolder]) {
-    let path = smart_folders_path();
+/// Load smart folders for an account. Falls back to the plain
+/// `smart_folders.toml` if no per-account file exists (migration path).
+pub fn load_smart_folders(account_name: &str) -> Vec<SmartFolder> {
+    // Try per-account file first
+    let path = smart_folders_path(account_name);
+    if let Ok(contents) = std::fs::read_to_string(&path) {
+        if let Ok(file) = toml::from_str::<SmartFoldersFile>(&contents) {
+            return file.folders;
+        }
+    }
+    // Fall back to plain smart_folders.toml
+    if !account_name.is_empty() {
+        let fallback = smart_folders_path("");
+        if let Ok(contents) = std::fs::read_to_string(&fallback) {
+            if let Ok(file) = toml::from_str::<SmartFoldersFile>(&contents) {
+                return file.folders;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Save smart folders for an account. Creates parent directories if needed.
+pub fn save_smart_folders(folders: &[SmartFolder], account_name: &str) {
+    let path = smart_folders_path(account_name);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
