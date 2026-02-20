@@ -127,6 +127,9 @@ pub struct App {
     // Set when a background shell command finishes with reindex=true
     pub needs_reindex: bool,
 
+    // True while mu server is processing an (index) command
+    pub indexing: bool,
+
     // Channel sender for background shell command results (receiver lives in run loop)
     shell_tx: tokio::sync::mpsc::UnboundedSender<Result<ShellResult, ShellError>>,
 
@@ -143,7 +146,6 @@ pub struct ShellPending {
 struct ShellResult {
     command: String,
     reindex: bool,
-    reload_folder: bool,
     stdout: String,
     stderr: String,
     status: std::process::ExitStatus,
@@ -209,6 +211,7 @@ impl App {
             compose_pending: None,
             shell_pending: None,
             needs_reindex: false,
+            indexing: false,
             shell_tx,
             config,
         })
@@ -905,7 +908,6 @@ impl App {
                                 let _ = tx.send(Ok(ShellResult {
                                     command: cmd,
                                     reindex: true,
-                                    reload_folder: false,
                                     stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
                                     stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
                                     status: o.status,
@@ -1011,7 +1013,6 @@ impl App {
                                 let _ = tx.send(Ok(ShellResult {
                                     command: cmd,
                                     reindex,
-                                    reload_folder: false,
                                     stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
                                     stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
                                     status: o.status,
@@ -1322,36 +1323,18 @@ pub async fn run(mut app: App) -> Result<()> {
             Duration::from_millis(100)
         };
 
-        // Handle deferred reindex: spawn `mu index` in the background
-        if app.needs_reindex {
+        // Start server-side reindex if requested (non-blocking: we poll in the select loop)
+        if app.needs_reindex && !app.indexing {
             app.needs_reindex = false;
-            debug_log!("reindex: spawning background mu index");
+            debug_log!("reindex: sending (index) to mu server");
             app.set_status("Reindexing...".to_string());
-            let tx = app.shell_tx.clone();
-            tokio::spawn(async move {
-                let output = tokio::process::Command::new("mu")
-                    .arg("index")
-                    .output()
-                    .await;
-                match output {
-                    Ok(o) => {
-                        let _ = tx.send(Ok(ShellResult {
-                            command: "mu index".to_string(),
-                            reindex: false,
-                            reload_folder: true,
-                            stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
-                            stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
-                            status: o.status,
-                        }));
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(ShellError {
-                            command: "mu index".to_string(),
-                            error: e.to_string(),
-                        }));
-                    }
+            match app.mu.start_index().await {
+                Ok(()) => app.indexing = true,
+                Err(e) => {
+                    debug_log!("reindex: start_index failed: {}", e);
+                    app.set_status(format!("Reindex error: {}", e));
                 }
-            });
+            }
         }
 
         // Drain any pending IPC commands before blocking on input
@@ -1374,6 +1357,26 @@ pub async fn run(mut app: App) -> Result<()> {
                 }
                 continue;
             }
+            index_frame = app.mu.poll_index_frame(), if app.indexing => {
+                match index_frame {
+                    Ok(true) => {
+                        // Index complete — reload folder
+                        app.indexing = false;
+                        debug_log!("reindex: complete, reloading folder");
+                        if let Err(e) = app.load_folder().await {
+                            debug_log!("reindex: reload error: {}", e);
+                        }
+                        app.set_status("Reindex complete".to_string());
+                    }
+                    Ok(false) => {} // progress update, keep polling
+                    Err(e) => {
+                        app.indexing = false;
+                        debug_log!("reindex: error: {}", e);
+                        app.set_status(format!("Reindex error: {}", e));
+                    }
+                }
+                continue;
+            }
             result = shell_rx.recv() => {
                 if let Some(result) = result {
                     match result {
@@ -1391,12 +1394,6 @@ pub async fn run(mut app: App) -> Result<()> {
                             if r.status.success() {
                                 if r.reindex {
                                     app.needs_reindex = true;
-                                }
-                                if r.reload_folder {
-                                    debug_log!("shell[{}]: reloading folder", r.command);
-                                    if let Err(e) = app.load_folder().await {
-                                        debug_log!("shell[{}]: reload error: {}", r.command, e);
-                                    }
                                 }
                                 if last_line.is_empty() {
                                     app.set_status(format!("Done: {}", r.command));
