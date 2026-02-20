@@ -164,7 +164,7 @@ Anytown, CA 90210
 # [bindings] entries apply to both normal and thread view modes.
 # [bindings.normal] and [bindings.thread] override per-mode.
 #
-# Action names: next_account, prev_account,
+# Action names: next_account, prev_account, next_folder, prev_folder,
 #   archive, trash, spam, move (open folder picker),
 #   toggle_read, toggle_star, undo, move_down, move_up, jump_top,
 #   jump_bottom, scroll_preview_down, scroll_preview_up,
@@ -233,7 +233,8 @@ Anytown, CA 90210
 # "g #"     = "go_trash"
 # "g !"     = "go_spam"
 # "g l"     = "go_folder_picker"
-# Tab / Shift+Tab also cycle folders (not rebindable)
+# tab       = "next_folder"
+# "shift+tab" = "prev_folder"
 #
 # Account switching (multi-account only)
 # "g tab"   = "next_account"
