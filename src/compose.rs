@@ -16,6 +16,15 @@ pub enum ComposeKind {
     Forward,
 }
 
+/// What the run loop should do when compose_pending is set.
+#[derive(Debug, Clone)]
+pub enum ComposePending {
+    /// Build context from current selection (normal keybinding path).
+    Kind(ComposeKind),
+    /// Pre-built context (from IPC compose URL).
+    Ready(ComposeContext),
+}
+
 /// Everything needed to build the compose buffer.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
