@@ -43,6 +43,13 @@ pub struct AccountConfig {
     pub smtp: SmtpConfig,
     #[serde(default)]
     pub folders: FolderConfig,
+    /// Path to mu database directory. Auto-derived for multi-account setups.
+    pub muhome: Option<String>,
+    /// Mark this account as the default (first with default=true wins).
+    #[serde(default)]
+    pub default: bool,
+    /// Per-account sync command (overrides global sync_command).
+    pub sync_command: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +188,41 @@ pub struct BindingsSection {
 // ---------------------------------------------------------------------------
 
 impl Config {
+    /// Return the index of the default account: first with `default = true`, or 0.
+    pub fn default_account_index(&self) -> usize {
+        self.accounts
+            .iter()
+            .position(|a| a.default)
+            .unwrap_or(0)
+    }
+
+    /// Return the effective sync command for an account index.
+    /// Uses the account's sync_command if set, otherwise falls back to global.
+    pub fn effective_sync_command(&self, account_idx: usize) -> Option<&str> {
+        self.accounts
+            .get(account_idx)
+            .and_then(|a| a.sync_command.as_deref())
+            .or(self.sync_command.as_deref())
+    }
+
+    /// Return the effective muhome for an account.
+    ///
+    /// If the account has an explicit `muhome`, use it (expanding `~`).
+    /// If there are multiple accounts and no explicit muhome, auto-derive
+    /// as `~/.cache/mu/<account_name>`.
+    /// Single-account configs without muhome return None (use system default).
+    pub fn effective_muhome(&self, account_idx: usize) -> Option<String> {
+        let account = self.accounts.get(account_idx)?;
+        if let Some(ref muhome) = account.muhome {
+            Some(expand_tilde(muhome))
+        } else if self.accounts.len() > 1 {
+            let home = std::env::var("HOME").unwrap_or_default();
+            Some(format!("{}/.cache/mu/{}", home, account.name))
+        } else {
+            None
+        }
+    }
+
     /// Try to load the configuration file from, in order:
     ///
     /// 1. `$HUTT_CONFIG`
@@ -231,6 +273,16 @@ impl Config {
         }
 
         paths
+    }
+}
+
+/// Expand `~/` prefix in a path string.
+fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{}/{}", home, rest)
+    } else {
+        path.to_string()
     }
 }
 
@@ -471,5 +523,144 @@ mod tests {
         assert_eq!(folders.sent, "/Sent");
         assert_eq!(folders.trash, "/Trash");
         assert_eq!(folders.spam, "/Spam");
+    }
+
+    #[test]
+    fn parse_multi_account_config() {
+        let toml_str = r#"
+            [[accounts]]
+            name    = "Work"
+            email   = "work@example.com"
+            maildir = "~/Maildir/work"
+            muhome  = "~/.cache/mu/work"
+            default = true
+            sync_command = "mbsync work"
+
+            [accounts.smtp]
+            host = "smtp.example.com"
+            port = 465
+            encryption = "ssl"
+            username = "work@example.com"
+
+            [[accounts]]
+            name    = "Personal"
+            email   = "me@personal.example"
+            maildir = "~/Maildir/personal"
+
+            [accounts.smtp]
+            host = "smtp.personal.example"
+            port = 587
+            encryption = "starttls"
+            username = "me@personal.example"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.accounts.len(), 2);
+        assert_eq!(cfg.accounts[0].muhome.as_deref(), Some("~/.cache/mu/work"));
+        assert!(cfg.accounts[0].default);
+        assert_eq!(cfg.accounts[0].sync_command.as_deref(), Some("mbsync work"));
+        assert!(cfg.accounts[1].muhome.is_none());
+        assert!(!cfg.accounts[1].default);
+        assert!(cfg.accounts[1].sync_command.is_none());
+    }
+
+    #[test]
+    fn default_account_index_first_default() {
+        let toml_str = r#"
+            [[accounts]]
+            name = "A"
+            email = "a@a.com"
+            maildir = "~/a"
+            [accounts.smtp]
+            host = "smtp.a.com"
+
+            [[accounts]]
+            name = "B"
+            email = "b@b.com"
+            maildir = "~/b"
+            default = true
+            [accounts.smtp]
+            host = "smtp.b.com"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.default_account_index(), 1);
+    }
+
+    #[test]
+    fn default_account_index_no_default() {
+        let toml_str = r#"
+            [[accounts]]
+            name = "A"
+            email = "a@a.com"
+            maildir = "~/a"
+            [accounts.smtp]
+            host = "smtp.a.com"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.default_account_index(), 0);
+    }
+
+    #[test]
+    fn effective_sync_command_account_overrides_global() {
+        let toml_str = r#"
+            sync_command = "mbsync -a"
+
+            [[accounts]]
+            name = "Work"
+            email = "w@w.com"
+            maildir = "~/w"
+            sync_command = "mbsync work"
+            [accounts.smtp]
+            host = "smtp.w.com"
+
+            [[accounts]]
+            name = "Personal"
+            email = "p@p.com"
+            maildir = "~/p"
+            [accounts.smtp]
+            host = "smtp.p.com"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.effective_sync_command(0), Some("mbsync work"));
+        assert_eq!(cfg.effective_sync_command(1), Some("mbsync -a"));
+    }
+
+    #[test]
+    fn effective_muhome_auto_derive() {
+        let toml_str = r#"
+            [[accounts]]
+            name = "Work"
+            email = "w@w.com"
+            maildir = "~/w"
+            [accounts.smtp]
+            host = "smtp.w.com"
+
+            [[accounts]]
+            name = "Personal"
+            email = "p@p.com"
+            maildir = "~/p"
+            [accounts.smtp]
+            host = "smtp.p.com"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        // Multi-account with no explicit muhome → auto-derived
+        let muhome = cfg.effective_muhome(0).unwrap();
+        assert!(muhome.ends_with("/.cache/mu/Work"));
+        let muhome = cfg.effective_muhome(1).unwrap();
+        assert!(muhome.ends_with("/.cache/mu/Personal"));
+    }
+
+    #[test]
+    fn effective_muhome_single_account_none() {
+        let toml_str = r#"
+            [[accounts]]
+            name = "Only"
+            email = "o@o.com"
+            maildir = "~/o"
+            [accounts.smtp]
+            host = "smtp.o.com"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        // Single account, no explicit muhome → None (use system default)
+        assert!(cfg.effective_muhome(0).is_none());
     }
 }
