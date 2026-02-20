@@ -139,7 +139,7 @@ impl<'a> Widget for ThreadView<'a> {
                 let max_chars = (area.x + area.width).saturating_sub(x) as usize;
                 let truncated = truncate_str(text, max_chars);
                 buf.set_string(x, y, &truncated, *style);
-                x += truncated.len() as u16;
+                x += unicode_width::UnicodeWidthStr::width(truncated.as_str()) as u16;
             }
         }
     }
