@@ -181,6 +181,37 @@ to cancel.
 | `?`      | Help overlay      |
 | `q`      | Quit              |
 
+## Custom Keybindings
+
+All default keybindings can be overridden or extended in the `[bindings]`
+section of your config file. Values can be:
+
+- A built-in action name: `"archive"`, `"trash"`, `"sync_mail"`, etc.
+- A folder path (starts with `/`): `"/Sent"`, `"/Archive/2026"`
+- A shell command table: `{ shell = "mbsync -a", reindex = true }`
+
+```toml
+[bindings]
+G         = { shell = "mbsync almnck", reindex = true }
+"ctrl+t"  = { shell = "tig", suspend = true }
+"g s"     = "/Sent"
+A         = "archive"
+```
+
+Use `[bindings.normal]` and `[bindings.thread]` for per-mode overrides
+(e.g., bind `o` to different actions in list vs thread view).
+
+Key syntax: `"e"`, `"#"`, `"G"` (shift), `"ctrl+r"`, `"shift+space"`,
+`"g i"` (two-key sequence), `"enter"`, `"esc"`, `"space"`, `"f1"`–`"f12"`.
+
+Shell commands run asynchronously by default. Add `suspend = true` for
+interactive programs that need the terminal (the TUI pauses and resumes
+afterwards). Add `reindex = true` to re-index mu and reload the folder
+after the command finishes.
+
+See [config.sample.toml](config.sample.toml) for the full list of action
+names.
+
 ## Neovim Plugin
 
 hutt includes an optional Neovim plugin for compose mode. Add the `nvim/`

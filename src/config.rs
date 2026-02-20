@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
@@ -13,7 +14,8 @@ pub struct Config {
     pub editor: String,
     pub sync_command: Option<String>,
     pub snippets: Vec<Snippet>,
-    pub keybindings: KeybindingOverrides,
+    #[serde(default)]
+    pub bindings: BindingsSection,
 }
 
 impl Default for Config {
@@ -23,7 +25,7 @@ impl Default for Config {
             editor: "nvim".to_string(),
             sync_command: None,
             snippets: Vec::new(),
-            keybindings: KeybindingOverrides::default(),
+            bindings: BindingsSection::default(),
         }
     }
 }
@@ -114,16 +116,51 @@ pub struct Snippet {
 }
 
 // ---------------------------------------------------------------------------
-// Keybinding overrides (placeholder for future use)
+// Keybindings
 // ---------------------------------------------------------------------------
 
+/// What a key binding maps to.
+///
+/// Strings are shorthand: a bare name like `"archive"` is a built-in action,
+/// a `/`-prefixed string like `"/Sent"` navigates to that folder.
+///
+/// A table with `shell = "..."` runs a shell command, with optional
+/// `reindex` (re-index mu afterwards) and `suspend` (pause TUI for
+/// interactive programs).
+///
+/// Future expansion: `{ action = "move", folder = "/Archive/2026" }` for
+/// parameterized actions (not yet implemented).
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum BindingValue {
+    /// `"archive"` (action name) or `"/Sent"` (folder path).
+    Short(String),
+    /// `{ shell = "mbsync almnck", reindex = true, suspend = false }`.
+    Shell {
+        shell: String,
+        #[serde(default)]
+        reindex: bool,
+        #[serde(default)]
+        suspend: bool,
+    },
+}
+
+/// The `[bindings]` config section.
+///
+/// Top-level keys are global (apply to normal + thread modes).
+/// `[bindings.normal]` and `[bindings.thread]` provide per-mode overrides.
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
-pub struct KeybindingOverrides {
-    /// Map of action name -> key string, e.g. { "archive" = "A" }.
-    /// Interpretation is deferred until the keymap module consumes this.
+pub struct BindingsSection {
+    /// Mode-specific bindings for normal (list) mode.
+    #[serde(default)]
+    pub normal: HashMap<String, BindingValue>,
+    /// Mode-specific bindings for thread view mode.
+    #[serde(default)]
+    pub thread: HashMap<String, BindingValue>,
+    /// Global bindings (apply to both normal and thread modes).
     #[serde(flatten)]
-    pub overrides: std::collections::HashMap<String, String>,
+    pub global: HashMap<String, BindingValue>,
 }
 
 // ---------------------------------------------------------------------------
@@ -268,15 +305,66 @@ mod tests {
     }
 
     #[test]
-    fn parse_keybinding_overrides() {
+    fn parse_bindings_global() {
         let toml_str = r#"
-            [keybindings]
-            archive = "A"
-            delete = "D"
+            [bindings]
+            A = "archive"
+            "g s" = "/Sent"
+            G = { shell = "mbsync almnck", reindex = true }
         "#;
         let cfg: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.keybindings.overrides.get("archive").unwrap(), "A");
-        assert_eq!(cfg.keybindings.overrides.get("delete").unwrap(), "D");
+        assert_eq!(cfg.bindings.global.len(), 3);
+        assert!(matches!(
+            cfg.bindings.global.get("A"),
+            Some(BindingValue::Short(s)) if s == "archive"
+        ));
+        assert!(matches!(
+            cfg.bindings.global.get("g s"),
+            Some(BindingValue::Short(s)) if s == "/Sent"
+        ));
+        assert!(matches!(
+            cfg.bindings.global.get("G"),
+            Some(BindingValue::Shell { shell, reindex: true, suspend: false })
+                if shell == "mbsync almnck"
+        ));
+    }
+
+    #[test]
+    fn parse_bindings_per_mode() {
+        let toml_str = r#"
+            [bindings]
+            e = "archive"
+
+            [bindings.normal]
+            o = "open_thread"
+
+            [bindings.thread]
+            o = "thread_toggle_expand"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.bindings.global.len(), 1);
+        assert!(matches!(
+            cfg.bindings.normal.get("o"),
+            Some(BindingValue::Short(s)) if s == "open_thread"
+        ));
+        assert!(matches!(
+            cfg.bindings.thread.get("o"),
+            Some(BindingValue::Short(s)) if s == "thread_toggle_expand"
+        ));
+    }
+
+    #[test]
+    fn parse_bindings_shell_suspend() {
+        let toml_str = r#"
+            [bindings]
+            "ctrl+t" = { shell = "tig", suspend = true }
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert!(matches!(
+            cfg.bindings.global.get("ctrl+t"),
+            Some(BindingValue::Shell { shell, reindex: false, suspend: true })
+                if shell == "tig"
+        ));
     }
 
     #[test]

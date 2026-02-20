@@ -108,16 +108,43 @@ Anytown, CA 90210
 """
 
 # ---------------------------------------------------------------------------
-# Keybinding overrides
+# Custom keybindings
 # ---------------------------------------------------------------------------
-# Override the default key for any named action.
-# Action names match the keymap module: archive, trash, spam, toggle_read,
-# toggle_star, undo, compose, reply, reply_all, forward, copy_message_url,
-# copy_thread_url, open_in_browser, sync_mail, quit, etc.
+# Bind keys to built-in actions, shell commands, or folder navigation.
+# Custom bindings are checked before the hardcoded defaults.
 #
-# Values are single-character strings or special names like "Enter", "Esc".
+# Value types:
+#   "action_name"                     — built-in action (see list below)
+#   "/Folder/Path"                    — navigate to a maildir folder
+#   { shell = "cmd", reindex = true } — run a shell command
+#
+# Key syntax:
+#   "e", "#", "G" (shift), "ctrl+r", "shift+space"
+#   "g i" (two-key sequence, space-separated)
+#   "enter", "esc", "space", "tab", "up", "down", "f1"–"f12"
+#
+# [bindings] entries apply to both normal and thread view modes.
+# [bindings.normal] and [bindings.thread] override per-mode.
+#
+# Action names: archive, trash, spam, toggle_read, toggle_star, undo,
+#   move_down, move_up, jump_top, jump_bottom, scroll_preview_down,
+#   scroll_preview_up, half_page_down, half_page_up, full_page_down,
+#   full_page_up, go_inbox, go_archive, go_drafts, go_sent, go_trash,
+#   go_spam, go_folder_picker, search, filter_unread, filter_starred,
+#   filter_needs_reply, toggle_select, select_down, select_up,
+#   open_thread, close_thread, thread_next, thread_prev,
+#   thread_toggle_expand, thread_expand_all, compose, reply, reply_all,
+#   forward, copy_message_url, copy_thread_url, open_in_browser,
+#   command_palette, help, sync, quit
 
-[keybindings]
-# archive = "A"     # default: e
-# trash   = "D"     # default: #
-# spam    = "S"     # default: !
+[bindings]
+# G = { shell = "mbsync -a", reindex = true }   # sync mail with G
+# "ctrl+t" = { shell = "tig", suspend = true }  # open tig (suspends TUI)
+# "g s" = "/Sent"                                # g then s → go to Sent
+# A = "archive"                                  # remap archive to A
+
+# [bindings.normal]
+# o = "open_thread"
+
+# [bindings.thread]
+# o = "thread_toggle_expand"

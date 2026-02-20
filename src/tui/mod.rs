@@ -121,12 +121,23 @@ pub struct App {
     // Compose pending (set by action handler, processed by run loop)
     pub compose_pending: Option<compose::ComposeKind>,
 
+    // Shell command pending (suspend=true, processed by run loop like compose)
+    pub shell_pending: Option<ShellPending>,
+
     // Config
     pub config: Config,
 }
 
+pub struct ShellPending {
+    pub command: String,
+    pub reindex: bool,
+}
+
 impl App {
     pub async fn new(mu: MuClient, config: Config) -> Result<Self> {
+        let mut keymap = KeyMapper::new();
+        keymap.load_bindings(&config.bindings);
+
         Ok(Self {
             current_folder: "/Inbox".to_string(),
             current_query: String::new(),
@@ -136,7 +147,7 @@ impl App {
             preview_scroll: 0,
             preview_cache: RenderCache::new(),
             mu,
-            keymap: KeyMapper::new(),
+            keymap,
             should_quit: false,
             mode: InputMode::Normal,
             undo_stack: UndoStack::new(),
@@ -166,6 +177,7 @@ impl App {
             status_message: None,
             status_time: None,
             compose_pending: None,
+            shell_pending: None,
             config,
         })
     }
@@ -924,6 +936,44 @@ impl App {
                 _ => {}
             },
 
+            // Custom bindings: shell commands
+            Action::RunShell {
+                command,
+                reindex,
+                suspend,
+            } => {
+                if suspend {
+                    // Deferred to run loop (needs terminal suspend/resume)
+                    self.shell_pending = Some(ShellPending { command, reindex });
+                } else {
+                    self.set_status(format!("Running: {}", command));
+                    let output = tokio::process::Command::new("sh")
+                        .args(["-c", &command])
+                        .output()
+                        .await;
+                    match output {
+                        Ok(o) if o.status.success() => {
+                            if reindex {
+                                let _ = self.mu.index(true).await;
+                                self.load_folder().await?;
+                            }
+                            self.set_status(format!("Done: {}", command));
+                        }
+                        Ok(o) => {
+                            self.set_status(format!("Exited {}: {}", o.status, command));
+                        }
+                        Err(e) => {
+                            self.set_status(format!("Failed: {}", e));
+                        }
+                    }
+                }
+            }
+
+            // Custom bindings: folder navigation
+            Action::NavigateFolder(folder) => {
+                self.navigate_folder(&folder).await?;
+            }
+
             // System
             Action::Quit => self.should_quit = true,
             Action::Noop => {}
@@ -1160,6 +1210,34 @@ pub async fn run(mut app: App) -> Result<()> {
                     }
                     Err(e) => app.set_status(format!("Compose error: {}", e)),
                 }
+            }
+            continue;
+        }
+
+        // Handle suspended shell command (like compose, needs terminal suspend/resume)
+        if let Some(pending) = app.shell_pending.take() {
+            terminal::disable_raw_mode()?;
+            io::stdout().execute(LeaveAlternateScreen)?;
+
+            let status = std::process::Command::new("sh")
+                .args(["-c", &pending.command])
+                .status();
+
+            terminal::enable_raw_mode()?;
+            io::stdout().execute(EnterAlternateScreen)?;
+            terminal.clear()?;
+
+            match status {
+                Ok(s) if s.success() => {
+                    app.set_status(format!("Done: {}", pending.command))
+                }
+                Ok(s) => app.set_status(format!("Exited {}: {}", s, pending.command)),
+                Err(e) => app.set_status(format!("Failed: {}", e)),
+            }
+
+            if pending.reindex {
+                let _ = app.mu.index(true).await;
+                app.load_folder().await?;
             }
             continue;
         }
