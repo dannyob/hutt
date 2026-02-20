@@ -87,19 +87,19 @@ impl PaletteEntry {
                 name: "Archive".into(),
                 description: "Archive the selected message".into(),
                 shortcut: Some("e".into()),
-                action: Action::Archive,
+                action: Action::MoveToFolder(Some("archive".to_string())),
             },
             PaletteEntry {
                 name: "Trash".into(),
                 description: "Move message to trash".into(),
                 shortcut: Some("#".into()),
-                action: Action::Trash,
+                action: Action::MoveToFolder(Some("trash".to_string())),
             },
             PaletteEntry {
                 name: "Spam".into(),
                 description: "Mark message as spam".into(),
                 shortcut: Some("!".into()),
-                action: Action::Spam,
+                action: Action::MoveToFolder(Some("spam".to_string())),
             },
             PaletteEntry {
                 name: "Toggle Read".into(),

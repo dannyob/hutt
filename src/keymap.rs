@@ -31,11 +31,9 @@ pub enum Action {
     FullPageDown,
     FullPageUp,
 
-    // Triage
-    Archive,
-    Trash,
-    Spam,
-    MoveToFolder,
+    // Triage — MoveToFolder(None) opens picker, Some("archive") resolves
+    // from account folders config, Some("/Literal") uses path directly.
+    MoveToFolder(Option<String>),
     ToggleRead,
     ToggleStar,
     Undo,
@@ -234,10 +232,10 @@ pub fn parse_action_name(name: &str) -> Result<Action, String> {
         "half_page_up" => Ok(Action::HalfPageUp),
         "full_page_down" => Ok(Action::FullPageDown),
         "full_page_up" => Ok(Action::FullPageUp),
-        "archive" => Ok(Action::Archive),
-        "trash" => Ok(Action::Trash),
-        "spam" => Ok(Action::Spam),
-        "move_to_folder" | "move" => Ok(Action::MoveToFolder),
+        "archive" => Ok(Action::MoveToFolder(Some("archive".to_string()))),
+        "trash" => Ok(Action::MoveToFolder(Some("trash".to_string()))),
+        "spam" => Ok(Action::MoveToFolder(Some("spam".to_string()))),
+        "move_to_folder" | "move" => Ok(Action::MoveToFolder(None)),
         "toggle_read" => Ok(Action::ToggleRead),
         "toggle_star" => Ok(Action::ToggleStar),
         "undo" => Ok(Action::Undo),
@@ -304,6 +302,9 @@ fn resolve_binding_value(value: &BindingValue) -> Result<BindAction, String> {
             reindex: *reindex,
             suspend: *suspend,
         }),
+        BindingValue::Move { folder } => {
+            Ok(BindAction::Builtin(Action::MoveToFolder(Some(folder.clone()))))
+        }
     }
 }
 
@@ -489,10 +490,12 @@ impl KeyMapper {
             (KeyCode::Char('b'), KeyModifiers::CONTROL) => Action::FullPageUp,
 
             // Triage
-            (KeyCode::Char('e'), KeyModifiers::NONE) => Action::Archive,
-            (KeyCode::Char('#'), _) => Action::Trash,
-            (KeyCode::Char('!'), _) => Action::Spam,
-            (KeyCode::Char('m'), KeyModifiers::NONE) => Action::MoveToFolder,
+            (KeyCode::Char('e'), KeyModifiers::NONE) => {
+                Action::MoveToFolder(Some("archive".to_string()))
+            }
+            (KeyCode::Char('#'), _) => Action::MoveToFolder(Some("trash".to_string())),
+            (KeyCode::Char('!'), _) => Action::MoveToFolder(Some("spam".to_string())),
+            (KeyCode::Char('m'), KeyModifiers::NONE) => Action::MoveToFolder(None),
             // Note: 'u' without Ctrl is ToggleRead
             (KeyCode::Char('u'), KeyModifiers::NONE) => Action::ToggleRead,
             (KeyCode::Char('s'), KeyModifiers::NONE) => Action::ToggleStar,
@@ -588,10 +591,12 @@ impl KeyMapper {
             (KeyCode::Char(' '), KeyModifiers::NONE) => Action::ScrollPreviewDown,
             (KeyCode::Char(' '), KeyModifiers::SHIFT) => Action::ScrollPreviewUp,
             // Triage actions still work in thread view
-            (KeyCode::Char('e'), KeyModifiers::NONE) => Action::Archive,
-            (KeyCode::Char('#'), _) => Action::Trash,
-            (KeyCode::Char('!'), _) => Action::Spam,
-            (KeyCode::Char('m'), KeyModifiers::NONE) => Action::MoveToFolder,
+            (KeyCode::Char('e'), KeyModifiers::NONE) => {
+                Action::MoveToFolder(Some("archive".to_string()))
+            }
+            (KeyCode::Char('#'), _) => Action::MoveToFolder(Some("trash".to_string())),
+            (KeyCode::Char('!'), _) => Action::MoveToFolder(Some("spam".to_string())),
+            (KeyCode::Char('m'), KeyModifiers::NONE) => Action::MoveToFolder(None),
             (KeyCode::Char('u'), KeyModifiers::NONE) => Action::ToggleRead,
             (KeyCode::Char('s'), KeyModifiers::NONE) => Action::ToggleStar,
             (KeyCode::Char('z'), KeyModifiers::NONE) => Action::Undo,
@@ -784,7 +789,7 @@ mod tests {
 
         let key = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE);
         let action = mapper.handle(key, &InputMode::Normal);
-        assert_eq!(action, Action::Trash); // overridden from Archive
+        assert_eq!(action, Action::MoveToFolder(Some("trash".to_string()))); // overridden from archive
     }
 
     #[test]

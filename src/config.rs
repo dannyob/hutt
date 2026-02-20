@@ -130,8 +130,14 @@ pub struct Snippet {
 /// `reindex` (re-index mu afterwards) and `suspend` (pause TUI for
 /// interactive programs).
 ///
-/// Future expansion: `{ action = "move", folder = "/Archive/2026" }` for
-/// parameterized actions (not yet implemented).
+/// What a key binding maps to.
+///
+/// Strings are shorthand: a bare name like `"archive"` is a built-in action,
+/// a `/`-prefixed string like `"/Sent"` navigates to that folder.
+///
+/// A table with `shell = "..."` runs a shell command.
+/// A table with `move = "..."` moves selected messages to a folder
+/// (alias like `"archive"` or literal path like `"/Projects"`).
 #[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum BindingValue {
@@ -144,6 +150,11 @@ pub enum BindingValue {
         reindex: bool,
         #[serde(default)]
         suspend: bool,
+    },
+    /// `{ move = "/Projects" }` or `{ move = "archive" }`.
+    Move {
+        #[serde(rename = "move")]
+        folder: String,
     },
 }
 
