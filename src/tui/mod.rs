@@ -603,9 +603,15 @@ impl App {
         // Determine new muhome
         let muhome = self.config.effective_muhome(index);
 
-        // Ensure mu database exists
+        // Ensure mu database exists (may run mu init + index on first switch)
         if let Some(account) = self.config.accounts.get(index) {
-            crate::mu_client::ensure_mu_database(muhome.as_deref(), &account.maildir).await?;
+            let account_name = account.name.clone();
+            let maildir = account.maildir.clone();
+            let db_dir = muhome.as_deref().map(|p| std::path::PathBuf::from(p).join("xapian"));
+            if db_dir.as_ref().is_some_and(|d| !d.is_dir()) {
+                self.set_status(format!("Initializing mu database for {}...", account_name));
+            }
+            crate::mu_client::ensure_mu_database(muhome.as_deref(), &maildir).await?;
         }
 
         // Start new mu server
