@@ -87,8 +87,9 @@ impl<'a> Widget for ThreadView<'a> {
                 msg_index: Some(idx),
             });
 
-            // If expanded, show body
+            // If expanded, show body (with word wrap)
             if msg.expanded {
+                let wrap_width = area.width.saturating_sub(2) as usize; // 1 char padding each side
                 if let Some(ref body) = msg.body {
                     for line in body.lines() {
                         let style = if line.starts_with('>') {
@@ -96,10 +97,12 @@ impl<'a> Widget for ThreadView<'a> {
                         } else {
                             header_base.fg(Color::White)
                         };
-                        lines.push(RenderedLine {
-                            content: vec![(line.to_string(), style)],
-                            msg_index: Some(idx),
-                        });
+                        for wrapped in wrap_line(line, wrap_width) {
+                            lines.push(RenderedLine {
+                                content: vec![(wrapped, style)],
+                                msg_index: Some(idx),
+                            });
+                        }
                     }
                 } else {
                     lines.push(RenderedLine {
@@ -148,6 +151,40 @@ struct RenderedLine {
     content: Vec<(String, Style)>,
     /// Which message index this line belongs to (None for thread chrome)
     msg_index: Option<usize>,
+}
+
+/// Wrap a line of text to fit within `max_width` characters.
+/// Tries to break at word boundaries; falls back to hard breaks.
+fn wrap_line(s: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![String::new()];
+    }
+    if s.is_empty() {
+        return vec![String::new()];
+    }
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_width {
+        return vec![s.to_string()];
+    }
+    let mut result = Vec::new();
+    let mut pos = 0;
+    while pos < chars.len() {
+        let remaining = chars.len() - pos;
+        if remaining <= max_width {
+            result.push(chars[pos..].iter().collect());
+            break;
+        }
+        // Try to find a word boundary to break at
+        let chunk_end = pos + max_width;
+        let break_at = chars[pos..chunk_end]
+            .iter()
+            .rposition(|&c| c == ' ' || c == '-' || c == '/')
+            .map(|i| pos + i + 1) // break after the space/separator
+            .unwrap_or(chunk_end); // hard break if no good spot
+        result.push(chars[pos..break_at].iter().collect());
+        pos = break_at;
+    }
+    result
 }
 
 /// Truncate a string to fit within `max_width` characters, adding "\u{2026}" if needed.
