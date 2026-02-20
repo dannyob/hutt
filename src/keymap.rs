@@ -47,6 +47,10 @@ pub enum Action {
     GoSpam,
     GoFolderPicker,
 
+    // Folder cycling
+    NextFolder,
+    PrevFolder,
+
     // Account switching
     NextAccount,
     PrevAccount,
@@ -250,6 +254,8 @@ pub fn parse_action_name(name: &str) -> Result<Action, String> {
         "go_trash" => Ok(Action::GoTrash),
         "go_spam" => Ok(Action::GoSpam),
         "go_folder_picker" => Ok(Action::GoFolderPicker),
+        "next_folder" => Ok(Action::NextFolder),
+        "prev_folder" => Ok(Action::PrevFolder),
         "next_account" => Ok(Action::NextAccount),
         "prev_account" => Ok(Action::PrevAccount),
         "enter_search" | "search" => Ok(Action::EnterSearch),
@@ -541,6 +547,10 @@ impl KeyMapper {
             // Help
             (KeyCode::Char('?'), _) => Action::ShowHelp,
 
+            // Folder cycling
+            (KeyCode::Tab, _) => Action::NextFolder,
+            (KeyCode::BackTab, _) => Action::PrevFolder,
+
             // Quit
             (KeyCode::Char('q'), KeyModifiers::NONE) => Action::Quit,
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => Action::Quit,
@@ -613,6 +623,9 @@ impl KeyMapper {
             (KeyCode::Char('r'), KeyModifiers::NONE) => Action::Reply,
             (KeyCode::Char('a'), KeyModifiers::NONE) => Action::ReplyAll,
             (KeyCode::Char('f'), KeyModifiers::NONE) => Action::Forward,
+            // Folder cycling
+            (KeyCode::Tab, _) => Action::NextFolder,
+            (KeyCode::BackTab, _) => Action::PrevFolder,
             // Help
             (KeyCode::Char('?'), _) => Action::ShowHelp,
             // Quit

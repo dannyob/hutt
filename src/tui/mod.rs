@@ -1144,6 +1144,18 @@ impl App {
                 self.mode = InputMode::FolderPicker;
             }
 
+            // Folder cycling
+            Action::NextFolder => {
+                if let Some(folder) = self.next_folder(1) {
+                    self.navigate_folder(&folder).await?;
+                }
+            }
+            Action::PrevFolder => {
+                if let Some(folder) = self.next_folder(-1) {
+                    self.navigate_folder(&folder).await?;
+                }
+            }
+
             // Account switching
             Action::NextAccount => {
                 if self.config.accounts.len() > 1 {
@@ -2082,26 +2094,6 @@ pub async fn run(mut app: App) -> Result<()> {
                 continue;
             }
             last_key_time = Instant::now();
-
-            // Tab / Shift+Tab: cycle through folders in normal/thread mode
-            if matches!(app.mode, InputMode::Normal | InputMode::ThreadView) {
-                if key.code == crossterm::event::KeyCode::Tab {
-                    if let Some(folder) = app.next_folder(1) {
-                        if let Err(e) = app.navigate_folder(&folder).await {
-                            app.set_status(format!("Error: {}", e));
-                        }
-                    }
-                    continue;
-                }
-                if key.code == crossterm::event::KeyCode::BackTab {
-                    if let Some(folder) = app.next_folder(-1) {
-                        if let Err(e) = app.navigate_folder(&folder).await {
-                            app.set_status(format!("Error: {}", e));
-                        }
-                    }
-                    continue;
-                }
-            }
 
             // In popup modes, handle arrow keys for navigation before passing to keymap
             match app.mode {
