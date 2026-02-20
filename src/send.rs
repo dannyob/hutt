@@ -1,9 +1,30 @@
 use anyhow::{Context, Result};
 use lettre::message::{Mailbox, MessageBuilder};
 use lettre::transport::smtp::authentication::Credentials;
-use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
+use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::SmtpConfig;
+
+/// Generate a unique Message-ID for outgoing messages.
+fn generate_message_id(from_domain: &str) -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let random: u64 = rand_u64();
+    format!("<{}.{}@{}>", timestamp, random, from_domain)
+}
+
+/// Simple pseudo-random u64 using time + pid for uniqueness.
+fn rand_u64() -> u64 {
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let pid = std::process::id() as u64;
+    t.wrapping_mul(6364136223846793005).wrapping_add(pid)
+}
 
 /// Parsed compose-file content split at the first blank line.
 pub struct ParsedMessage {
@@ -69,7 +90,9 @@ fn get_password(config: &SmtpConfig) -> Result<String> {
             anyhow::bail!("password command failed: {}", stderr.trim());
         }
 
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        // Take only the first line (standard pass convention: line 1 = password).
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout.lines().next().unwrap_or("").trim().to_string())
     } else if let Some(ref pw) = config.password {
         Ok(pw.clone())
     } else {
@@ -117,79 +140,96 @@ impl SmtpSender {
         Ok(Self { transport })
     }
 
-    /// Parse a raw composed message string and send it via SMTP.
-    pub async fn send(&self, raw_message: &str) -> Result<()> {
-        let parsed = parse_composed_message(raw_message)?;
+    /// Parse a raw composed message string, build a proper RFC 2822 message,
+    /// send it via SMTP, and return the formatted message bytes (for saving
+    /// to the Sent folder).
+    pub async fn send(&self, raw_message: &str) -> Result<Vec<u8>> {
+        let message = build_message(raw_message)?;
 
-        // Build the lettre Message from parsed headers + body
-        let mut builder = MessageBuilder::new();
-
-        for (name, value) in &parsed.headers {
-            match name.to_lowercase().as_str() {
-                "from" => {
-                    let mailbox: Mailbox = value
-                        .parse()
-                        .with_context(|| format!("invalid From address: {}", value))?;
-                    builder = builder.from(mailbox);
-                }
-                "to" => {
-                    // May be comma-separated
-                    for addr in value.split(',') {
-                        let addr = addr.trim();
-                        if !addr.is_empty() {
-                            let mailbox: Mailbox = addr
-                                .parse()
-                                .with_context(|| format!("invalid To address: {}", addr))?;
-                            builder = builder.to(mailbox);
-                        }
-                    }
-                }
-                "cc" => {
-                    for addr in value.split(',') {
-                        let addr = addr.trim();
-                        if !addr.is_empty() {
-                            let mailbox: Mailbox = addr
-                                .parse()
-                                .with_context(|| format!("invalid Cc address: {}", addr))?;
-                            builder = builder.cc(mailbox);
-                        }
-                    }
-                }
-                "subject" => {
-                    builder = builder.subject(value.as_str());
-                }
-                "in-reply-to" => {
-                    builder = builder.in_reply_to(value.to_string());
-                }
-                "references" => {
-                    builder = builder.references(value.to_string());
-                }
-                "date" => {
-                    // Let lettre handle date generation; skip user-provided Date
-                }
-                _ => {
-                    // Unknown headers are silently ignored for now.
-                    // Lettre doesn't expose a convenient way to add arbitrary
-                    // headers, so we only handle the well-known ones above.
-                }
-            }
-        }
-
-        let message = builder
-            .body(parsed.body)
-            .context("failed to build email message")?;
+        let formatted = message.formatted();
 
         self.transport
             .send(message)
             .await
             .context("SMTP send failed")?;
 
-        Ok(())
+        Ok(formatted)
     }
 }
 
-/// Convenience function: create an SmtpSender and send a message in one call.
-pub async fn send_message(raw_message: &str, config: &SmtpConfig) -> Result<()> {
+/// Build a lettre Message from a raw composed message string, generating a
+/// proper Message-ID.
+fn build_message(raw_message: &str) -> Result<Message> {
+    let parsed = parse_composed_message(raw_message)?;
+
+    let mut builder = MessageBuilder::new();
+    let mut from_domain = "localhost".to_string();
+
+    for (name, value) in &parsed.headers {
+        match name.to_lowercase().as_str() {
+            "from" => {
+                let mailbox: Mailbox = value
+                    .parse()
+                    .with_context(|| format!("invalid From address: {}", value))?;
+                // Extract domain for Message-ID generation
+                let email_str: &str = mailbox.email.as_ref();
+                if let Some(domain) = email_str.split('@').nth(1) {
+                    from_domain = domain.to_string();
+                }
+                builder = builder.from(mailbox);
+            }
+            "to" => {
+                for addr in value.split(',') {
+                    let addr = addr.trim();
+                    if !addr.is_empty() {
+                        let mailbox: Mailbox = addr
+                            .parse()
+                            .with_context(|| format!("invalid To address: {}", addr))?;
+                        builder = builder.to(mailbox);
+                    }
+                }
+            }
+            "cc" => {
+                for addr in value.split(',') {
+                    let addr = addr.trim();
+                    if !addr.is_empty() {
+                        let mailbox: Mailbox = addr
+                            .parse()
+                            .with_context(|| format!("invalid Cc address: {}", addr))?;
+                        builder = builder.cc(mailbox);
+                    }
+                }
+            }
+            "subject" => {
+                builder = builder.subject(value.as_str());
+            }
+            "in-reply-to" => {
+                builder = builder.in_reply_to(value.to_string());
+            }
+            "references" => {
+                builder = builder.references(value.to_string());
+            }
+            "date" => {
+                // Let lettre handle date generation; skip user-provided Date
+            }
+            _ => {
+                // Unknown headers are silently ignored for now.
+            }
+        }
+    }
+
+    // Generate a proper Message-ID so replies can reference it
+    let msg_id = generate_message_id(&from_domain);
+    builder = builder.message_id(Some(msg_id));
+
+    builder
+        .body(parsed.body)
+        .context("failed to build email message")
+}
+
+/// Send a message via SMTP and return the formatted message bytes
+/// (for saving to Sent folder).
+pub async fn send_message(raw_message: &str, config: &SmtpConfig) -> Result<Vec<u8>> {
     let sender = SmtpSender::new(config).await?;
     sender.send(raw_message).await
 }
