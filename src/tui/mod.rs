@@ -587,6 +587,77 @@ impl App {
         Ok(())
     }
 
+    // ── Account switching ────────────────────────────────────────────
+
+    async fn switch_account(&mut self, index: usize) -> Result<()> {
+        if index == self.active_account {
+            return Ok(());
+        }
+        if index >= self.config.accounts.len() {
+            return Ok(());
+        }
+
+        // Quit current mu server
+        self.mu.quit().await?;
+
+        // Determine new muhome
+        let muhome = self.config.effective_muhome(index);
+
+        // Ensure mu database exists
+        if let Some(account) = self.config.accounts.get(index) {
+            crate::mu_client::ensure_mu_database(muhome.as_deref(), &account.maildir).await?;
+        }
+
+        // Start new mu server
+        self.mu = MuClient::start(muhome.as_deref()).await?;
+
+        // Update active account
+        self.active_account = index;
+
+        // Clear state
+        self.envelopes.clear();
+        self.thread_messages.clear();
+        self.selected_set.clear();
+        self.undo_stack = UndoStack::new();
+        self.thread_selected = 0;
+        self.thread_scroll = 0;
+        self.selected = 0;
+        self.scroll_offset = 0;
+        self.preview_scroll = 0;
+
+        // Reload smart folders for new account
+        let acct_name = self.account_name().to_string();
+        self.smart_folders = smart_folders::load_smart_folders(&acct_name);
+        self.smart_folder_queries = self.smart_folders
+            .iter()
+            .map(|sf| (format!("@{}", sf.name), sf.query.clone()))
+            .collect();
+
+        // Rebuild known_folders
+        self.known_folders = vec![
+            "/Inbox".into(),
+            "/Archive".into(),
+            "/Drafts".into(),
+            "/Sent".into(),
+            "/Trash".into(),
+            "/Junk".into(),
+        ];
+        for sf in &self.smart_folders {
+            self.known_folders.push(format!("@{}", sf.name));
+        }
+
+        // Navigate to new account's inbox
+        let inbox = self.account()
+            .map(|a| a.folders.inbox.clone())
+            .unwrap_or_else(|| "/Inbox".to_string());
+        self.current_folder = inbox;
+        self.load_folder().await?;
+
+        let name = self.account().map(|a| a.name.as_str()).unwrap_or("?");
+        self.set_status(format!("Switched to {}", name));
+        Ok(())
+    }
+
     // ── Folder switching ────────────────────────────────────────────
 
     async fn navigate_folder(&mut self, folder: &str) -> Result<()> {
@@ -1071,6 +1142,24 @@ impl App {
                 self.folder_filter.clear();
                 self.folder_selected = 0;
                 self.mode = InputMode::FolderPicker;
+            }
+
+            // Account switching
+            Action::NextAccount => {
+                if self.config.accounts.len() > 1 {
+                    let next = (self.active_account + 1) % self.config.accounts.len();
+                    self.switch_account(next).await?;
+                }
+            }
+            Action::PrevAccount => {
+                if self.config.accounts.len() > 1 {
+                    let prev = if self.active_account == 0 {
+                        self.config.accounts.len() - 1
+                    } else {
+                        self.active_account - 1
+                    };
+                    self.switch_account(prev).await?;
+                }
             }
 
             // Search
