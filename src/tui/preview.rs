@@ -201,6 +201,8 @@ pub fn scan_buffer_urls(buf: &Buffer, area: Rect) -> Vec<HyperlinkRegion> {
     let mut full_text = String::new();
     let mut positions: Vec<CharPos> = Vec::new();
 
+    // positions is byte-indexed (one entry per byte of full_text) so that
+    // byte offsets from String::find() can index directly into it.
     for y in area.y..area.y + area.height {
         let mut x = x_start;
         let mut row_end_x = x_start;
@@ -208,7 +210,10 @@ pub fn scan_buffer_urls(buf: &Buffer, area: Rect) -> Vec<HyperlinkRegion> {
             let cell = &buf[(x, y)];
             let sym = cell.symbol();
             for ch in sym.chars() {
-                positions.push(CharPos { x, y });
+                let pos = CharPos { x, y };
+                for _ in 0..ch.len_utf8() {
+                    positions.push(CharPos { x: pos.x, y: pos.y });
+                }
                 full_text.push(ch);
             }
             let w = (unicode_width::UnicodeWidthStr::width(sym)).max(1) as u16;
