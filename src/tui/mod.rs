@@ -124,6 +124,9 @@ pub struct App {
     // Shell command pending (suspend=true, processed by run loop like compose)
     pub shell_pending: Option<ShellPending>,
 
+    // Set when a background shell command finishes with reindex=true
+    pub needs_reindex: bool,
+
     // Channel sender for background shell command results (receiver lives in run loop)
     shell_tx: tokio::sync::mpsc::UnboundedSender<Result<ShellResult, ShellError>>,
 
@@ -140,6 +143,7 @@ pub struct ShellPending {
 struct ShellResult {
     command: String,
     reindex: bool,
+    reload_folder: bool,
     stdout: String,
     stderr: String,
     status: std::process::ExitStatus,
@@ -204,6 +208,7 @@ impl App {
             status_time: None,
             compose_pending: None,
             shell_pending: None,
+            needs_reindex: false,
             shell_tx,
             config,
         })
@@ -885,18 +890,35 @@ impl App {
                 self.mode = InputMode::CommandPalette;
             }
 
-            // Sync
+            // Sync — runs sync_command in background, then reindexes
             Action::SyncMail => {
-                let sync_cmd = self.config.sync_command.clone();
-                if let Some(cmd) = sync_cmd {
-                    self.set_status("Syncing...");
-                    let _ = tokio::process::Command::new("sh")
-                        .args(["-c", &cmd])
-                        .output()
-                        .await;
-                    let _ = self.mu.index(true).await;
-                    self.load_folder().await?;
-                    self.set_status("Sync complete");
+                if let Some(cmd) = self.config.sync_command.clone() {
+                    self.set_status(format!("Syncing: {}...", cmd));
+                    let tx = self.shell_tx.clone();
+                    tokio::spawn(async move {
+                        let output = tokio::process::Command::new("sh")
+                            .args(["-c", &cmd])
+                            .output()
+                            .await;
+                        match output {
+                            Ok(o) => {
+                                let _ = tx.send(Ok(ShellResult {
+                                    command: cmd,
+                                    reindex: true,
+                                    reload_folder: false,
+                                    stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
+                                    stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
+                                    status: o.status,
+                                }));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(Err(ShellError {
+                                    command: cmd,
+                                    error: e.to_string(),
+                                }));
+                            }
+                        }
+                    });
                 } else {
                     self.set_status("No sync_command configured");
                 }
@@ -989,6 +1011,7 @@ impl App {
                                 let _ = tx.send(Ok(ShellResult {
                                     command: cmd,
                                     reindex,
+                                    reload_folder: false,
                                     stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
                                     stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
                                     status: o.status,
@@ -1283,8 +1306,7 @@ pub async fn run(mut app: App) -> Result<()> {
             }
 
             if pending.reindex {
-                let _ = app.mu.index(true).await;
-                app.load_folder().await?;
+                app.needs_reindex = true;
             }
             continue;
         }
@@ -1299,6 +1321,38 @@ pub async fn run(mut app: App) -> Result<()> {
         } else {
             Duration::from_millis(100)
         };
+
+        // Handle deferred reindex: spawn `mu index` in the background
+        if app.needs_reindex {
+            app.needs_reindex = false;
+            debug_log!("reindex: spawning background mu index");
+            app.set_status("Reindexing...".to_string());
+            let tx = app.shell_tx.clone();
+            tokio::spawn(async move {
+                let output = tokio::process::Command::new("mu")
+                    .arg("index")
+                    .output()
+                    .await;
+                match output {
+                    Ok(o) => {
+                        let _ = tx.send(Ok(ShellResult {
+                            command: "mu index".to_string(),
+                            reindex: false,
+                            reload_folder: true,
+                            stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
+                            stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
+                            status: o.status,
+                        }));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(ShellError {
+                            command: "mu index".to_string(),
+                            error: e.to_string(),
+                        }));
+                    }
+                }
+            });
+        }
 
         // Drain any pending IPC commands before blocking on input
         while let Ok(cmd) = ipc_rx.try_recv() {
@@ -1336,8 +1390,13 @@ pub async fn run(mut app: App) -> Result<()> {
                                 .unwrap_or("");
                             if r.status.success() {
                                 if r.reindex {
-                                    let _ = app.mu.index(true).await;
-                                    app.load_folder().await?;
+                                    app.needs_reindex = true;
+                                }
+                                if r.reload_folder {
+                                    debug_log!("shell[{}]: reloading folder", r.command);
+                                    if let Err(e) = app.load_folder().await {
+                                        debug_log!("shell[{}]: reload error: {}", r.command, e);
+                                    }
                                 }
                                 if last_line.is_empty() {
                                     app.set_status(format!("Done: {}", r.command));
