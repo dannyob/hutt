@@ -533,8 +533,13 @@ impl App {
                     original_maildir,
                     original_flags,
                 } => {
+                    let flags = if original_flags.is_empty() {
+                        None
+                    } else {
+                        Some(original_flags.as_str())
+                    };
                     self.mu
-                        .move_msg(docid, Some(&original_maildir), Some(&original_flags))
+                        .move_msg(docid, Some(&original_maildir), flags)
                         .await?;
                     self.load_folder().await?;
                 }
