@@ -142,6 +142,7 @@ impl MuClient {
     }
 
     /// Like recv() but with a timeout.  Returns None on timeout.
+    #[allow(dead_code)]
     async fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<Value>> {
         loop {
             match tokio::time::timeout(timeout, self.reader.next_frame()).await {
@@ -209,13 +210,45 @@ impl MuClient {
         Ok(envelopes)
     }
 
+    /// Run a find query and return envelopes plus the total match count.
+    /// Used for live preview during smart folder creation.
+    pub async fn find_preview(
+        &mut self,
+        query: &str,
+        max_num: u32,
+    ) -> Result<(Vec<Envelope>, u32)> {
+        let cmd = format!(
+            "(find :query \"{}\" :sortfield :date :maxnum {} :threads t :descending t)",
+            escape_string(query),
+            max_num,
+        );
+        self.send(&cmd).await?;
+
+        let mut envelopes = Vec::new();
+        loop {
+            let value = self.reader.next_frame().await?;
+            if mu_sexp::is_erase(&value) {
+                continue;
+            }
+            if let Some(err) = mu_sexp::is_error(&value) {
+                bail!("mu find error: {}", err);
+            }
+            if let Some(count) = mu_sexp::is_found(&value) {
+                return Ok((envelopes, count));
+            }
+            let mut batch = mu_sexp::parse_find_response(&value)?;
+            envelopes.append(&mut batch);
+        }
+    }
+
     /// Move a message to a different maildir and/or change flags.
+    /// Returns the new docid assigned by mu after the move.
     pub async fn move_msg(
         &mut self,
         docid: u32,
         maildir: Option<&str>,
         flags: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<u32> {
         let mut cmd = format!("(move :docid {}", docid);
         if let Some(md) = maildir {
             cmd.push_str(&format!(" :maildir \"{}\"", escape_string(md)));
@@ -226,9 +259,15 @@ impl MuClient {
         cmd.push_str(" :rename t)");
 
         self.send(&cmd).await?;
-        // Read and discard update response
-        let _resp = self.recv().await?;
-        Ok(())
+        let resp = self.recv().await?;
+        // The :update response contains the updated envelope with the new docid
+        if let Some(update) = mu_sexp::plist_get(&resp, "update") {
+            if let Some(new_docid) = mu_sexp::plist_get_u32(update, "docid") {
+                return Ok(new_docid);
+            }
+        }
+        // Fallback: return original docid if we can't parse the response
+        Ok(docid)
     }
 
     /// Send the `(index)` command to mu server without waiting for the

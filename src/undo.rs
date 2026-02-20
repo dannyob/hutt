@@ -1,9 +1,24 @@
-/// Undo stack for triage actions.
-/// Each entry records the state before a triage action so it can be reversed.
+//! Undo stack for triage and folder actions.
+//! Each entry records the state before an action so it can be reversed.
+
+use crate::smart_folders::SmartFolder;
+
+pub enum UndoAction {
+    MoveMessage {
+        docid: u32,
+        original_maildir: String,
+        original_flags: String,
+    },
+    DeleteSmartFolder {
+        folder: SmartFolder,
+    },
+    DeleteMaildirFolder {
+        path: String,
+    },
+}
+
 pub struct UndoEntry {
-    pub docid: u32,
-    pub original_maildir: String,
-    pub original_flags: String,
+    pub action: UndoAction,
     pub description: String,
 }
 
@@ -26,10 +41,12 @@ impl UndoStack {
         self.entries.pop()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }

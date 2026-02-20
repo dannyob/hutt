@@ -26,7 +26,13 @@ impl<'a> Widget for TopBar<'a> {
                 let subj = self.thread_subject.unwrap_or("Thread");
                 format!(" {} ", subj)
             }
-            _ => format!(" {} ", self.folder),
+            _ => {
+                if self.folder.starts_with('@') {
+                    format!(" \u{2605} {} ", &self.folder[1..])
+                } else {
+                    format!(" {} ", self.folder)
+                }
+            }
         };
 
         let right = if self.unread_count > 0 {
@@ -73,9 +79,15 @@ impl<'a> BottomBar<'a> {
             InputMode::ThreadView => {
                 "j/k:nav o:expand e:archive r:reply q:back ?:help"
             }
-            InputMode::FolderPicker => "j/k:nav Enter:select Esc:cancel | type to filter",
+            InputMode::FolderPicker => {
+                "j/k:nav Enter:select C-d:delete Esc:cancel | type to filter"
+            }
             InputMode::CommandPalette => "j/k:nav Enter:select Esc:cancel | type to filter",
             InputMode::Help => "j/k:scroll ?/q/Esc:close",
+            InputMode::SmartFolderCreate => "Type query | Enter:confirm Esc:cancel",
+            InputMode::SmartFolderName => "Type name | Enter:save Esc:back",
+            InputMode::MaildirCreate => "Type path | Enter:create Esc:cancel",
+            InputMode::MoveToFolder => "Enter:move Esc:cancel | type to filter",
         }
     }
 }

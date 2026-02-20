@@ -7,6 +7,7 @@ mod mime_render;
 mod mu_client;
 mod mu_sexp;
 mod send;
+mod smart_folders;
 mod tui;
 mod undo;
 
