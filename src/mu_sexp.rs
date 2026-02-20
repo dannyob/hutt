@@ -259,8 +259,27 @@ pub fn parse_find_response(value: &Value) -> Result<Vec<Envelope>> {
 }
 
 /// Check if a response is an error.
+///
+/// mu sends errors as `(:error <code> :message "text")`.  The error code
+/// can be a number or a string depending on the mu version, so we check
+/// for the `:error` key with any value type and prefer `:message` for the
+/// human-readable description.
 pub fn is_error(value: &Value) -> Option<String> {
-    plist_get_str(value, "error").map(|s| s.to_string())
+    if plist_get(value, "error").is_some() {
+        // Prefer :message field for descriptive text
+        if let Some(msg) = plist_get_str(value, "message") {
+            return Some(msg.to_string());
+        }
+        // Fall back to the :error value itself
+        if let Some(s) = plist_get_str(value, "error") {
+            return Some(s.to_string());
+        }
+        if let Some(code) = plist_get_u32(value, "error") {
+            return Some(format!("error code {}", code));
+        }
+        return Some("unknown error".to_string());
+    }
+    None
 }
 
 /// Check if this is a :found response (end of find results).

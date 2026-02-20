@@ -1,7 +1,30 @@
 use anyhow::{bail, Context, Result};
 use lexpr::Value;
+use std::sync::OnceLock;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+
+fn debug_log_path() -> Option<&'static str> {
+    static PATH: OnceLock<Option<String>> = OnceLock::new();
+    PATH.get_or_init(|| std::env::var("HUTT_LOG").ok())
+        .as_deref()
+}
+
+macro_rules! mu_log {
+    ($($arg:tt)*) => {
+        if let Some(path) = debug_log_path() {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                use std::io::Write;
+                let _ = writeln!(f, "mu: {}", format_args!($($arg)*));
+            }
+        }
+    };
+}
 
 use crate::envelope::Envelope;
 use crate::mu_sexp;
@@ -118,6 +141,25 @@ impl MuClient {
         }
     }
 
+    /// Like recv() but with a timeout.  Returns None on timeout.
+    async fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<Value>> {
+        loop {
+            match tokio::time::timeout(timeout, self.reader.next_frame()).await {
+                Ok(Ok(value)) => {
+                    if mu_sexp::is_erase(&value) {
+                        continue;
+                    }
+                    if let Some(err) = mu_sexp::is_error(&value) {
+                        bail!("mu server error: {}", err);
+                    }
+                    return Ok(Some(value));
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Ok(None), // timeout
+            }
+        }
+    }
+
     pub async fn ping(&mut self) -> Result<()> {
         self.send("(ping)").await?;
         let resp = self.recv().await?;
@@ -190,27 +232,45 @@ impl MuClient {
     }
 
     /// Run mu index.
-    pub async fn index(&mut self, lazy: bool) -> Result<()> {
-        let cmd = if lazy {
-            "(index :lazy t)".to_string()
-        } else {
-            "(index)".to_string()
-        };
-        self.send(&cmd).await?;
-        // Index sends progress updates then a final (:info index ...) message.
-        // For now just drain until we see something that's not an index update.
+    ///
+    /// The mu server responds with progress updates and then a final
+    /// completion message.  We drain responses with a per-message timeout
+    /// so a protocol mismatch can't hang the caller forever.
+    ///
+    /// Note: the `_lazy` parameter is accepted for API compatibility but
+    /// ignored — mu server's `(index)` command does not support `:lazy`
+    /// in all versions, and a plain `(index)` is fast enough.
+    pub async fn index(&mut self, _lazy: bool) -> Result<()> {
+        let cmd = "(index)";
+        self.send(cmd).await?;
+
+        let timeout = Duration::from_secs(30);
+        mu_log!("index: sent {}", cmd);
         loop {
-            let value = self.recv().await?;
-            // Index complete when we get an :index response
-            if mu_sexp::plist_get(&value, "index").is_some() {
-                break;
+            match self.recv_timeout(timeout).await? {
+                Some(value) => {
+                    mu_log!("index: recv {:?}", value);
+                    // Index complete when we get an :index or :info response
+                    if mu_sexp::plist_get(&value, "index").is_some() {
+                        mu_log!("index: complete (:index)");
+                        return Ok(());
+                    }
+                    if mu_sexp::plist_get(&value, "info").is_some() {
+                        mu_log!("index: complete (:info)");
+                        return Ok(());
+                    }
+                    if mu_sexp::is_update(&value) {
+                        continue; // progress update, keep reading
+                    }
+                    // Unknown response type — log and keep trying
+                    mu_log!("index: unexpected response type, skipping");
+                }
+                None => {
+                    mu_log!("index: timed out after {}s", timeout.as_secs());
+                    bail!("mu index: timed out after {}s waiting for response", timeout.as_secs());
+                }
             }
-            if mu_sexp::plist_get(&value, "info").is_some() {
-                break;
-            }
-            // Could be progress updates, keep reading
         }
-        Ok(())
     }
 
     pub async fn quit(&mut self) -> Result<()> {
