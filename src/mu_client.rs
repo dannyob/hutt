@@ -231,46 +231,44 @@ impl MuClient {
         Ok(())
     }
 
-    /// Run mu index.
-    ///
-    /// The mu server responds with progress updates and then a final
-    /// completion message.  We drain responses with a per-message timeout
-    /// so a protocol mismatch can't hang the caller forever.
-    ///
-    /// Note: the `_lazy` parameter is accepted for API compatibility but
-    /// ignored — mu server's `(index)` command does not support `:lazy`
-    /// in all versions, and a plain `(index)` is fast enough.
-    pub async fn index(&mut self, _lazy: bool) -> Result<()> {
-        let cmd = "(index)";
-        self.send(cmd).await?;
+    /// Send the `(index)` command to mu server without waiting for the
+    /// response.  Call `poll_index_frame()` to read responses one at a
+    /// time from the event loop.
+    pub async fn start_index(&mut self) -> Result<()> {
+        mu_log!("index: sent (index)");
+        self.send("(index)").await
+    }
 
-        let timeout = Duration::from_secs(30);
-        mu_log!("index: sent {}", cmd);
-        loop {
-            match self.recv_timeout(timeout).await? {
-                Some(value) => {
-                    mu_log!("index: recv {:?}", value);
-                    // Index complete when we get an :index or :info response
-                    if mu_sexp::plist_get(&value, "index").is_some() {
-                        mu_log!("index: complete (:index)");
-                        return Ok(());
-                    }
-                    if mu_sexp::plist_get(&value, "info").is_some() {
-                        mu_log!("index: complete (:info)");
-                        return Ok(());
-                    }
-                    if mu_sexp::is_update(&value) {
-                        continue; // progress update, keep reading
-                    }
-                    // Unknown response type — log and keep trying
-                    mu_log!("index: unexpected response type, skipping");
-                }
-                None => {
-                    mu_log!("index: timed out after {}s", timeout.as_secs());
-                    bail!("mu index: timed out after {}s waiting for response", timeout.as_secs());
-                }
-            }
+    /// Read one frame from the mu server during an index operation.
+    ///
+    /// Returns:
+    /// - `Ok(true)`  — indexing is complete
+    /// - `Ok(false)` — progress update, call again
+    /// - `Err(_)`    — error (including from mu server)
+    pub async fn poll_index_frame(&mut self) -> Result<bool> {
+        let value = self.reader.next_frame().await?;
+        mu_log!("index: recv {:?}", value);
+
+        if mu_sexp::is_erase(&value) {
+            return Ok(false);
         }
+        if let Some(err) = mu_sexp::is_error(&value) {
+            mu_log!("index: error: {}", err);
+            bail!("mu index error: {}", err);
+        }
+        if mu_sexp::plist_get(&value, "index").is_some() {
+            mu_log!("index: complete (:index)");
+            return Ok(true);
+        }
+        if mu_sexp::plist_get(&value, "info").is_some() {
+            mu_log!("index: complete (:info)");
+            return Ok(true);
+        }
+        if mu_sexp::is_update(&value) {
+            return Ok(false); // progress update
+        }
+        mu_log!("index: unexpected response, skipping");
+        Ok(false)
     }
 
     pub async fn quit(&mut self) -> Result<()> {
