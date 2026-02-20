@@ -17,18 +17,21 @@ use anyhow::Result;
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
-    let initial_folder = if args.len() > 1 {
-        args[1].clone()
-    } else {
-        "/Inbox".to_string()
-    };
-
     // Load config
     let config = config::Config::load()?;
 
     // Determine starting account and its muhome
     let default_idx = config.default_account_index();
     let muhome = config.effective_muhome(default_idx);
+
+    // Determine initial folder: CLI arg > account's inbox > "/Inbox"
+    let initial_folder = if args.len() > 1 {
+        args[1].clone()
+    } else {
+        config.accounts.get(default_idx)
+            .map(|a| a.folders.inbox.clone())
+            .unwrap_or_else(|| "/Inbox".to_string())
+    };
 
     // Ensure mu database exists (auto-init for new accounts)
     if let Some(account) = config.accounts.get(default_idx) {
