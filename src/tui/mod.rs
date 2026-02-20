@@ -183,6 +183,11 @@ impl App {
         self.config.accounts.get(self.active_account)
     }
 
+    /// Return the active account's name (for per-account file paths).
+    fn account_name(&self) -> &str {
+        self.account().map(|a| a.name.as_str()).unwrap_or("")
+    }
+
     pub async fn new(mu: MuClient, config: Config) -> Result<Self> {
         debug_log!("App::new: accounts={} editor={:?} bindings_global={} bindings_normal={} bindings_thread={}",
             config.accounts.len(), config.editor,
@@ -195,8 +200,11 @@ impl App {
 
         let (shell_tx, _) = tokio::sync::mpsc::unbounded_channel();
 
-        // Load smart folders from disk
-        let smart_folders = smart_folders::load_smart_folders();
+        let active_account = config.default_account_index();
+
+        // Load smart folders from disk for the default account
+        let acct_name = config.accounts.get(active_account).map(|a| a.name.as_str()).unwrap_or("");
+        let smart_folders = smart_folders::load_smart_folders(acct_name);
         let smart_folder_queries: HashMap<String, String> = smart_folders
             .iter()
             .map(|sf| (format!("@{}", sf.name), sf.query.clone()))
@@ -213,7 +221,6 @@ impl App {
             known_folders.push(format!("@{}", sf.name));
         }
 
-        let active_account = config.default_account_index();
         Ok(Self {
             active_account,
             current_folder: "/Inbox".to_string(),
@@ -553,7 +560,7 @@ impl App {
                 }
                 UndoAction::DeleteSmartFolder { folder } => {
                     self.smart_folders.push(folder.clone());
-                    smart_folders::save_smart_folders(&self.smart_folders);
+                    smart_folders::save_smart_folders(&self.smart_folders, self.account_name());
                     let key = format!("@{}", folder.name);
                     self.smart_folder_queries
                         .insert(key.clone(), folder.query);
@@ -663,7 +670,7 @@ impl App {
             // Smart folder — remove from list and save
             if let Some(pos) = self.smart_folders.iter().position(|sf| sf.name == name) {
                 let removed = self.smart_folders.remove(pos);
-                smart_folders::save_smart_folders(&self.smart_folders);
+                smart_folders::save_smart_folders(&self.smart_folders, self.account_name());
                 self.smart_folder_queries.remove(&folder);
                 self.known_folders.retain(|f| f != &folder);
                 self.undo_stack.push(UndoEntry {
@@ -1320,7 +1327,7 @@ impl App {
                             query: query.clone(),
                         };
                         self.smart_folders.push(sf);
-                        smart_folders::save_smart_folders(&self.smart_folders);
+                        smart_folders::save_smart_folders(&self.smart_folders, self.account_name());
                         let key = format!("@{}", name);
                         self.smart_folder_queries.insert(key.clone(), query);
                         self.known_folders.push(key.clone());
