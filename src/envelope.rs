@@ -8,10 +8,17 @@ pub struct Address {
     pub email: String,
 }
 
+impl Address {
+    /// Name only (for compact list views), falls back to email.
+    pub fn short_display(&self) -> String {
+        self.name.clone().unwrap_or_else(|| self.email.clone())
+    }
+}
+
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.name {
-            Some(name) => write!(f, "{}", name),
+            Some(name) => write!(f, "{} <{}>", name, self.email),
             None => write!(f, "{}", self.email),
         }
     }
@@ -121,10 +128,11 @@ impl Envelope {
         s
     }
 
+    /// Short form for the envelope list (name only, falls back to email).
     pub fn from_display(&self) -> String {
         self.from
             .first()
-            .map(|a| a.to_string())
+            .map(|a| a.short_display())
             .unwrap_or_else(|| "(unknown)".to_string())
     }
 
