@@ -56,7 +56,7 @@ impl<'a> Widget for TopBar<'a> {
 
 pub struct BottomBar<'a> {
     pub mode: &'a InputMode,
-    pub pending_key: Option<&'a str>,
+    pub pending_key: Option<String>,
     pub search_input: Option<&'a str>,
     pub status_message: Option<&'a str>,
     pub filter_desc: Option<&'a str>,
@@ -124,7 +124,7 @@ impl<'a> Widget for BottomBar<'a> {
             text.push_str(&format!(" [{}] ", filter));
         }
 
-        if let Some(pending) = self.pending_key {
+        if let Some(ref pending) = self.pending_key {
             text.push_str(&format!(" {}... | ", pending));
         }
 
