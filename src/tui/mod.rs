@@ -400,6 +400,54 @@ impl App {
 
     // ── Triage ──────────────────────────────────────────────────────
 
+    /// Resolve a move target string to (maildir_path, human_description).
+    ///
+    /// If `target` starts with `/`, it's a literal maildir path.
+    /// Otherwise it's an alias (archive, trash, spam, inbox, sent, drafts)
+    /// resolved from the active account's folder config.
+    fn resolve_move_target(&self, target: &str) -> (String, String) {
+        if target.starts_with('/') {
+            let desc = format!("Moved to {}", target);
+            return (target.to_string(), desc);
+        }
+        let folders = self
+            .config
+            .accounts
+            .first()
+            .map(|a| &a.folders);
+        let (path, desc) = match target {
+            "archive" => (
+                folders.map(|f| f.archive.clone()).unwrap_or_else(|| "/Archive".into()),
+                "Archived".into(),
+            ),
+            "trash" => (
+                folders.map(|f| f.trash.clone()).unwrap_or_else(|| "/Trash".into()),
+                "Trashed".into(),
+            ),
+            "spam" => (
+                folders.map(|f| f.spam.clone()).unwrap_or_else(|| "/Spam".into()),
+                "Marked as spam".into(),
+            ),
+            "inbox" => (
+                folders.map(|f| f.inbox.clone()).unwrap_or_else(|| "/Inbox".into()),
+                "Moved to inbox".into(),
+            ),
+            "sent" => (
+                folders.map(|f| f.sent.clone()).unwrap_or_else(|| "/Sent".into()),
+                "Moved to sent".into(),
+            ),
+            "drafts" => (
+                folders.map(|f| f.drafts.clone()).unwrap_or_else(|| "/Drafts".into()),
+                "Moved to drafts".into(),
+            ),
+            other => {
+                // Unknown alias — treat as literal path
+                (format!("/{}", other), format!("Moved to /{}", other))
+            }
+        };
+        (path, desc)
+    }
+
     async fn triage_move(&mut self, dest_maildir: &str, desc: &str) -> Result<()> {
         let targets = self.triage_targets();
         if targets.is_empty() {
@@ -959,12 +1007,12 @@ impl App {
                 self.preview_scroll = 0;
             }
 
-            // Triage
-            Action::Archive => self.triage_move("/Archive", "Archived").await?,
-            Action::Trash => self.triage_move("/Trash", "Trashed").await?,
-            Action::Spam => self.triage_move("/Junk", "Marked as spam").await?,
-            Action::MoveToFolder => {
-                if !self.triage_targets().is_empty() {
+            // Triage — move to folder (alias, literal path, or picker)
+            Action::MoveToFolder(ref target) => {
+                if let Some(dest) = target {
+                    let (maildir, desc) = self.resolve_move_target(dest);
+                    self.triage_move(&maildir, &desc).await?;
+                } else if !self.triage_targets().is_empty() {
                     self.folder_filter.clear();
                     self.folder_selected = 0;
                     self.mode = InputMode::MoveToFolder;
@@ -975,12 +1023,30 @@ impl App {
             Action::Undo => self.undo().await?,
 
             // Folder switching
-            Action::GoInbox => self.navigate_folder("/Inbox").await?,
-            Action::GoArchive => self.navigate_folder("/Archive").await?,
-            Action::GoDrafts => self.navigate_folder("/Drafts").await?,
-            Action::GoSent => self.navigate_folder("/Sent").await?,
-            Action::GoTrash => self.navigate_folder("/Trash").await?,
-            Action::GoSpam => self.navigate_folder("/Junk").await?,
+            Action::GoInbox => {
+                let (path, _) = self.resolve_move_target("inbox");
+                self.navigate_folder(&path).await?;
+            }
+            Action::GoArchive => {
+                let (path, _) = self.resolve_move_target("archive");
+                self.navigate_folder(&path).await?;
+            }
+            Action::GoDrafts => {
+                let (path, _) = self.resolve_move_target("drafts");
+                self.navigate_folder(&path).await?;
+            }
+            Action::GoSent => {
+                let (path, _) = self.resolve_move_target("sent");
+                self.navigate_folder(&path).await?;
+            }
+            Action::GoTrash => {
+                let (path, _) = self.resolve_move_target("trash");
+                self.navigate_folder(&path).await?;
+            }
+            Action::GoSpam => {
+                let (path, _) = self.resolve_move_target("spam");
+                self.navigate_folder(&path).await?;
+            }
             Action::GoFolderPicker => {
                 self.folder_filter.clear();
                 self.folder_selected = 0;
