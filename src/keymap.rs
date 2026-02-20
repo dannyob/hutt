@@ -11,6 +11,10 @@ pub enum InputMode {
     FolderPicker,
     CommandPalette,
     Help,
+    SmartFolderCreate,
+    SmartFolderName,
+    MaildirCreate,
+    MoveToFolder,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -31,6 +35,7 @@ pub enum Action {
     Archive,
     Trash,
     Spam,
+    MoveToFolder,
     ToggleRead,
     ToggleStar,
     Undo,
@@ -232,6 +237,7 @@ pub fn parse_action_name(name: &str) -> Result<Action, String> {
         "archive" => Ok(Action::Archive),
         "trash" => Ok(Action::Trash),
         "spam" => Ok(Action::Spam),
+        "move_to_folder" | "move" => Ok(Action::MoveToFolder),
         "toggle_read" => Ok(Action::ToggleRead),
         "toggle_star" => Ok(Action::ToggleStar),
         "undo" => Ok(Action::Undo),
@@ -406,7 +412,13 @@ impl KeyMapper {
     pub fn handle(&mut self, key: KeyEvent, mode: &InputMode) -> Action {
         // Input modes never use custom bindings (they need raw chars)
         match mode {
-            InputMode::Search | InputMode::FolderPicker | InputMode::CommandPalette => {
+            InputMode::Search
+            | InputMode::FolderPicker
+            | InputMode::MoveToFolder
+            | InputMode::CommandPalette
+            | InputMode::SmartFolderCreate
+            | InputMode::SmartFolderName
+            | InputMode::MaildirCreate => {
                 return self.handle_input(key);
             }
             _ => {}
@@ -480,6 +492,7 @@ impl KeyMapper {
             (KeyCode::Char('e'), KeyModifiers::NONE) => Action::Archive,
             (KeyCode::Char('#'), _) => Action::Trash,
             (KeyCode::Char('!'), _) => Action::Spam,
+            (KeyCode::Char('m'), KeyModifiers::NONE) => Action::MoveToFolder,
             // Note: 'u' without Ctrl is ToggleRead
             (KeyCode::Char('u'), KeyModifiers::NONE) => Action::ToggleRead,
             (KeyCode::Char('s'), KeyModifiers::NONE) => Action::ToggleStar,
@@ -578,6 +591,7 @@ impl KeyMapper {
             (KeyCode::Char('e'), KeyModifiers::NONE) => Action::Archive,
             (KeyCode::Char('#'), _) => Action::Trash,
             (KeyCode::Char('!'), _) => Action::Spam,
+            (KeyCode::Char('m'), KeyModifiers::NONE) => Action::MoveToFolder,
             (KeyCode::Char('u'), KeyModifiers::NONE) => Action::ToggleRead,
             (KeyCode::Char('s'), KeyModifiers::NONE) => Action::ToggleStar,
             (KeyCode::Char('z'), KeyModifiers::NONE) => Action::Undo,
@@ -733,6 +747,7 @@ mod tests {
             "archive",
             "trash",
             "spam",
+            "move_to_folder",
             "move_down",
             "sync_mail",
             "quit",

@@ -108,6 +108,34 @@ Anytown, CA 90210
 """
 
 # ---------------------------------------------------------------------------
+# Smart Folders (Virtual Folders)
+# ---------------------------------------------------------------------------
+# Smart folders are named mu search queries that appear alongside maildir
+# folders in the folder picker and Tab cycling.
+#
+# They are stored in a SEPARATE file:
+#   $XDG_CONFIG_HOME/hutt/smart_folders.toml
+#
+# You can also create/delete them interactively:
+#   - Open folder picker (g l), select "+ New smart folder"
+#   - Type a mu query, see live preview, press Enter, name it, Enter to save
+#   - Press 'd' on a smart folder in the picker to delete it (z to undo)
+#
+# Example smart_folders.toml:
+#
+#   [[folders]]
+#   name = "Unread from Danny"
+#   query = "from:danny flag:unread"
+#
+#   [[folders]]
+#   name = "Recent attachments"
+#   query = "mime:application/* date:1w.."
+#
+#   [[folders]]
+#   name = "This week"
+#   query = "date:1w.."
+
+# ---------------------------------------------------------------------------
 # Custom keybindings
 # ---------------------------------------------------------------------------
 # Bind keys to built-in actions, shell commands, or folder navigation.

@@ -24,6 +24,8 @@ use std::io;
 use std::time::Duration;
 use tokio::time::Instant;
 
+use std::collections::HashMap;
+
 use crate::compose;
 use crate::config::Config;
 use crate::envelope::{flags_from_string, Envelope};
@@ -32,7 +34,8 @@ use crate::links::{self, HuttUrl, IpcCommand, IpcListener};
 use crate::mime_render::{self, RenderCache};
 use crate::mu_client::{FindOpts, MuClient};
 use crate::send;
-use crate::undo::{UndoEntry, UndoStack};
+use crate::smart_folders::{self, SmartFolder};
+use crate::undo::{UndoAction, UndoEntry, UndoStack};
 
 use self::command_palette::{CommandPalette, PaletteEntry};
 use self::envelope_list::EnvelopeList;
@@ -106,6 +109,20 @@ pub struct App {
     pub folder_filter: String,
     pub folder_selected: usize,
 
+    // Smart folders
+    pub smart_folders: Vec<SmartFolder>,
+    pub smart_folder_queries: HashMap<String, String>, // "@name" -> query
+
+    // Smart folder creation
+    pub smart_create_query: String,
+    pub smart_create_name: String,
+    pub smart_create_phase: u8, // 0 = query, 1 = name
+    pub smart_create_preview: Vec<String>, // subject lines
+    pub smart_create_count: Option<u32>,
+
+    // Maildir creation
+    pub maildir_create_input: String,
+
     // Command palette
     pub palette_filter: String,
     pub palette_selected: usize,
@@ -170,6 +187,24 @@ impl App {
 
         let (shell_tx, _) = tokio::sync::mpsc::unbounded_channel();
 
+        // Load smart folders from disk
+        let smart_folders = smart_folders::load_smart_folders();
+        let smart_folder_queries: HashMap<String, String> = smart_folders
+            .iter()
+            .map(|sf| (format!("@{}", sf.name), sf.query.clone()))
+            .collect();
+        let mut known_folders = vec![
+            "/Inbox".into(),
+            "/Archive".into(),
+            "/Drafts".into(),
+            "/Sent".into(),
+            "/Trash".into(),
+            "/Junk".into(),
+        ];
+        for sf in &smart_folders {
+            known_folders.push(format!("@{}", sf.name));
+        }
+
         Ok(Self {
             current_folder: "/Inbox".to_string(),
             current_query: String::new(),
@@ -192,16 +227,17 @@ impl App {
             thread_messages: Vec::new(),
             thread_selected: 0,
             thread_scroll: 0,
-            known_folders: vec![
-                "/Inbox".into(),
-                "/Archive".into(),
-                "/Drafts".into(),
-                "/Sent".into(),
-                "/Trash".into(),
-                "/Junk".into(),
-            ],
+            known_folders,
             folder_filter: String::new(),
             folder_selected: 0,
+            smart_folders,
+            smart_folder_queries,
+            smart_create_query: String::new(),
+            smart_create_name: String::new(),
+            smart_create_phase: 0,
+            smart_create_preview: Vec::new(),
+            smart_create_count: None,
+            maildir_create_input: String::new(),
             palette_filter: String::new(),
             palette_selected: 0,
             palette_entries: PaletteEntry::all_actions(),
@@ -231,7 +267,9 @@ impl App {
     }
 
     fn build_query(&self) -> String {
-        let mut query = if self.current_folder.starts_with('/') {
+        let mut query = if let Some(q) = self.smart_folder_queries.get(&self.current_folder) {
+            q.clone()
+        } else if self.current_folder.starts_with('/') {
             format!("maildir:{}", self.current_folder)
         } else {
             self.current_folder.clone()
@@ -257,12 +295,7 @@ impl App {
         }
         // Scan maildir root recursively for all real folders
         if let Some(account) = self.config.accounts.first() {
-            let root = if account.maildir.starts_with("~/") {
-                let home = std::env::var("HOME").unwrap_or_default();
-                format!("{}/{}", home, &account.maildir[2..])
-            } else {
-                account.maildir.clone()
-            };
+            let root = expand_maildir_root(&account.maildir);
             let root_path = std::path::PathBuf::from(&root);
             let mut stack = vec![root_path.clone()];
             while let Some(dir) = stack.pop() {
@@ -285,6 +318,10 @@ impl App {
                     }
                 }
             }
+        }
+        // Re-add smart folder entries so they persist across reloads
+        for sf in &self.smart_folders {
+            folders.insert(format!("@{}", sf.name));
         }
         self.known_folders = folders.into_iter().collect();
         self.known_folders.sort();
@@ -370,13 +407,15 @@ impl App {
         }
         let count = targets.len();
         for (docid, maildir, flags) in &targets {
+            let new_docid = self.mu.move_msg(*docid, Some(dest_maildir), None).await?;
             self.undo_stack.push(UndoEntry {
-                docid: *docid,
-                original_maildir: maildir.clone(),
-                original_flags: flags.clone(),
+                action: UndoAction::MoveMessage {
+                    docid: new_docid,
+                    original_maildir: maildir.clone(),
+                    original_flags: flags.clone(),
+                },
                 description: desc.to_string(),
             });
-            let _ = self.mu.move_msg(*docid, Some(dest_maildir), None).await;
         }
         let removed: HashSet<u32> = targets.iter().map(|(d, _, _)| *d).collect();
         self.envelopes.retain(|e| !removed.contains(&e.docid));
@@ -393,20 +432,23 @@ impl App {
             return Ok(());
         }
         let count = targets.len();
-        for (docid, _maildir, flags) in &targets {
-            self.undo_stack.push(UndoEntry {
-                docid: *docid,
-                original_maildir: _maildir.clone(),
-                original_flags: flags.clone(),
-                description: format!("toggle {}", desc),
-            });
+        for (docid, maildir, flags) in &targets {
             let new_flags = if flags.contains(flag_char) {
                 flags.replace(flag_char, "")
             } else {
                 format!("{}{}", flags, flag_char)
             };
-            let _ = self.mu.move_msg(*docid, None, Some(&new_flags)).await;
+            let new_docid = self.mu.move_msg(*docid, None, Some(&new_flags)).await?;
+            self.undo_stack.push(UndoEntry {
+                action: UndoAction::MoveMessage {
+                    docid: new_docid,
+                    original_maildir: maildir.clone(),
+                    original_flags: flags.clone(),
+                },
+                description: format!("toggle {}", desc),
+            });
             if let Some(e) = self.envelopes.iter_mut().find(|e| e.docid == *docid) {
+                e.docid = new_docid;
                 e.flags = flags_from_string(&new_flags);
             }
         }
@@ -437,15 +479,39 @@ impl App {
 
     async fn undo(&mut self) -> Result<()> {
         if let Some(entry) = self.undo_stack.pop() {
-            let _ = self
-                .mu
-                .move_msg(
-                    entry.docid,
-                    Some(&entry.original_maildir),
-                    Some(&entry.original_flags),
-                )
-                .await;
-            self.load_folder().await?;
+            match entry.action {
+                UndoAction::MoveMessage {
+                    docid,
+                    original_maildir,
+                    original_flags,
+                } => {
+                    self.mu
+                        .move_msg(docid, Some(&original_maildir), Some(&original_flags))
+                        .await?;
+                    self.load_folder().await?;
+                }
+                UndoAction::DeleteSmartFolder { folder } => {
+                    self.smart_folders.push(folder.clone());
+                    smart_folders::save_smart_folders(&self.smart_folders);
+                    let key = format!("@{}", folder.name);
+                    self.smart_folder_queries
+                        .insert(key.clone(), folder.query);
+                    self.known_folders.push(key);
+                    self.known_folders.sort();
+                }
+                UndoAction::DeleteMaildirFolder { path } => {
+                    // Re-create the maildir directory structure
+                    if let Some(account) = self.config.accounts.first() {
+                        let root = expand_maildir_root(&account.maildir);
+                        let full = format!("{}{}", root, path);
+                        let _ = std::fs::create_dir_all(format!("{}/cur", full));
+                        let _ = std::fs::create_dir_all(format!("{}/new", full));
+                        let _ = std::fs::create_dir_all(format!("{}/tmp", full));
+                        self.known_folders.push(path);
+                        self.known_folders.sort();
+                    }
+                }
+            }
             self.set_status(format!("Undone: {}", entry.description));
         } else {
             self.set_status("Nothing to undo");
@@ -495,6 +561,99 @@ impl App {
         self.load_folder().await?;
         self.set_status(format!("Search: {}", self.search_input));
         Ok(())
+    }
+
+    // ── Smart folder creation helpers ────────────────────────────────
+
+    async fn update_smart_create_preview(&mut self) {
+        if smart_folders::should_search(&self.smart_create_query) {
+            match self.mu.find_preview(&self.smart_create_query, 5).await {
+                Ok((envelopes, count)) => {
+                    self.smart_create_count = Some(count);
+                    self.smart_create_preview = envelopes
+                        .iter()
+                        .map(|e| e.subject.clone())
+                        .collect();
+                }
+                Err(_) => {
+                    self.smart_create_count = Some(0);
+                    self.smart_create_preview.clear();
+                }
+            }
+        } else {
+            self.smart_create_count = None;
+            self.smart_create_preview.clear();
+        }
+    }
+
+    async fn delete_selected_folder(&mut self) {
+        let filtered = self.filtered_folders();
+        let folder = match filtered.get(self.folder_selected) {
+            Some(f) => f.clone(),
+            None => return,
+        };
+
+        if folder.starts_with("+ ") {
+            // Can't delete special entries
+            return;
+        }
+
+        if let Some(name) = folder.strip_prefix('@') {
+            // Smart folder — remove from list and save
+            if let Some(pos) = self.smart_folders.iter().position(|sf| sf.name == name) {
+                let removed = self.smart_folders.remove(pos);
+                smart_folders::save_smart_folders(&self.smart_folders);
+                self.smart_folder_queries.remove(&folder);
+                self.known_folders.retain(|f| f != &folder);
+                self.undo_stack.push(UndoEntry {
+                    action: UndoAction::DeleteSmartFolder { folder: removed },
+                    description: format!("Deleted smart folder {}", name),
+                });
+                self.set_status(format!("Deleted smart folder \"{}\" (z to undo)", name));
+                // Clamp selection
+                let max = self.filtered_folders().len();
+                if self.folder_selected >= max && max > 0 {
+                    self.folder_selected = max - 1;
+                }
+            }
+        } else if folder.starts_with('/') {
+            // Maildir — check if empty, then delete
+            if let Some(account) = self.config.accounts.first() {
+                let root = expand_maildir_root(&account.maildir);
+                let full = format!("{}{}", root, folder);
+                let full_path = std::path::PathBuf::from(&full);
+
+                // Check if maildir is empty (no files in cur/, new/, tmp/)
+                let is_empty = ["cur", "new", "tmp"].iter().all(|sub| {
+                    let sub_dir = full_path.join(sub);
+                    match std::fs::read_dir(&sub_dir) {
+                        Ok(entries) => entries
+                            .filter_map(|e| e.ok())
+                            .all(|e| !e.path().is_file()),
+                        Err(_) => true,
+                    }
+                });
+
+                if is_empty {
+                    // Delete the directory
+                    let _ = std::fs::remove_dir_all(&full_path);
+                    self.known_folders.retain(|f| f != &folder);
+                    self.undo_stack.push(UndoEntry {
+                        action: UndoAction::DeleteMaildirFolder {
+                            path: folder.clone(),
+                        },
+                        description: format!("Deleted folder {}", folder),
+                    });
+                    self.set_status(format!("Deleted folder \"{}\" (z to undo)", folder));
+                    let max = self.filtered_folders().len();
+                    if self.folder_selected >= max && max > 0 {
+                        self.folder_selected = max - 1;
+                    }
+                } else {
+                    self.set_status("Folder not empty, cannot delete");
+                }
+            }
+        }
     }
 
     // ── Thread view ─────────────────────────────────────────────────
@@ -598,9 +757,41 @@ impl App {
 
     fn filtered_folders(&self) -> Vec<String> {
         let filter = self.folder_filter.to_lowercase();
+        let mut result = Vec::new();
+        // Special entries always at top (not affected by filter)
+        result.push("+ New smart folder".to_string());
+        result.push("+ New maildir folder".to_string());
+        // Then filtered known folders
+        for f in &self.known_folders {
+            if filter.is_empty() {
+                result.push(f.clone());
+            } else {
+                // For smart folders (@Name), also match against just the name
+                let matches = f.to_lowercase().contains(&filter)
+                    || f.strip_prefix('@')
+                        .is_some_and(|name| name.to_lowercase().contains(&filter));
+                if matches {
+                    result.push(f.clone());
+                }
+            }
+        }
+        result
+    }
+
+    /// Like filtered_folders() but without the special "+ New ..." entries.
+    /// Used for MoveToFolder where those entries don't apply.
+    fn filtered_folders_plain(&self) -> Vec<String> {
+        let filter = self.folder_filter.to_lowercase();
         self.known_folders
             .iter()
-            .filter(|f| filter.is_empty() || f.to_lowercase().contains(&filter))
+            .filter(|f| {
+                if filter.is_empty() {
+                    return true;
+                }
+                f.to_lowercase().contains(&filter)
+                    || f.strip_prefix('@')
+                        .is_some_and(|name| name.to_lowercase().contains(&filter))
+            })
             .cloned()
             .collect()
     }
@@ -772,6 +963,13 @@ impl App {
             Action::Archive => self.triage_move("/Archive", "Archived").await?,
             Action::Trash => self.triage_move("/Trash", "Trashed").await?,
             Action::Spam => self.triage_move("/Junk", "Marked as spam").await?,
+            Action::MoveToFolder => {
+                if !self.triage_targets().is_empty() {
+                    self.folder_filter.clear();
+                    self.folder_selected = 0;
+                    self.mode = InputMode::MoveToFolder;
+                }
+            }
             Action::ToggleRead => self.triage_toggle_flag('S', "read/unread").await?,
             Action::ToggleStar => self.triage_toggle_flag('F', "star").await?,
             Action::Undo => self.undo().await?,
@@ -947,11 +1145,26 @@ impl App {
                 InputMode::Search => self.search_input.push(c),
                 InputMode::FolderPicker => {
                     self.folder_filter.push(c);
+                    // Skip past the two special entries to first real folder
+                    self.folder_selected = 2;
+                }
+                InputMode::MoveToFolder => {
+                    self.folder_filter.push(c);
                     self.folder_selected = 0;
                 }
                 InputMode::CommandPalette => {
                     self.palette_filter.push(c);
                     self.palette_selected = 0;
+                }
+                InputMode::SmartFolderCreate => {
+                    self.smart_create_query.push(c);
+                    self.update_smart_create_preview().await;
+                }
+                InputMode::SmartFolderName => {
+                    self.smart_create_name.push(c);
+                }
+                InputMode::MaildirCreate => {
+                    self.maildir_create_input.push(c);
                 }
                 _ => {}
             },
@@ -961,11 +1174,25 @@ impl App {
                 }
                 InputMode::FolderPicker => {
                     self.folder_filter.pop();
+                    self.folder_selected = 2;
+                }
+                InputMode::MoveToFolder => {
+                    self.folder_filter.pop();
                     self.folder_selected = 0;
                 }
                 InputMode::CommandPalette => {
                     self.palette_filter.pop();
                     self.palette_selected = 0;
+                }
+                InputMode::SmartFolderCreate => {
+                    self.smart_create_query.pop();
+                    self.update_smart_create_preview().await;
+                }
+                InputMode::SmartFolderName => {
+                    self.smart_create_name.pop();
+                }
+                InputMode::MaildirCreate => {
+                    self.maildir_create_input.pop();
                 }
                 _ => {}
             },
@@ -974,8 +1201,20 @@ impl App {
                 InputMode::FolderPicker => {
                     let filtered = self.filtered_folders();
                     if let Some(folder) = filtered.get(self.folder_selected).cloned() {
-                        self.mode = InputMode::Normal;
-                        self.navigate_folder(&folder).await?;
+                        if folder == "+ New smart folder" {
+                            self.smart_create_query.clear();
+                            self.smart_create_name.clear();
+                            self.smart_create_phase = 0;
+                            self.smart_create_preview.clear();
+                            self.smart_create_count = None;
+                            self.mode = InputMode::SmartFolderCreate;
+                        } else if folder == "+ New maildir folder" {
+                            self.maildir_create_input.clear();
+                            self.mode = InputMode::MaildirCreate;
+                        } else {
+                            self.mode = InputMode::Normal;
+                            self.navigate_folder(&folder).await?;
+                        }
                     }
                 }
                 InputMode::CommandPalette => {
@@ -984,6 +1223,68 @@ impl App {
                         let action = entry.action.clone();
                         self.mode = InputMode::Normal;
                         Box::pin(self.handle_action(action)).await?;
+                    }
+                }
+                InputMode::SmartFolderCreate => {
+                    if !self.smart_create_query.trim().is_empty() {
+                        self.smart_create_name = self.smart_create_query.clone();
+                        self.smart_create_phase = 1;
+                        self.mode = InputMode::SmartFolderName;
+                    }
+                }
+                InputMode::SmartFolderName => {
+                    let name = self.smart_create_name.trim().to_string();
+                    let query = self.smart_create_query.trim().to_string();
+                    if !name.is_empty() && !query.is_empty() {
+                        let sf = SmartFolder {
+                            name: name.clone(),
+                            query: query.clone(),
+                        };
+                        self.smart_folders.push(sf);
+                        smart_folders::save_smart_folders(&self.smart_folders);
+                        let key = format!("@{}", name);
+                        self.smart_folder_queries.insert(key.clone(), query);
+                        self.known_folders.push(key.clone());
+                        self.known_folders.sort();
+                        self.mode = InputMode::Normal;
+                        self.navigate_folder(&key).await?;
+                    }
+                }
+                InputMode::MaildirCreate => {
+                    let path = self.maildir_create_input.trim().to_string();
+                    if !path.is_empty() {
+                        let folder_path = if path.starts_with('/') {
+                            path.clone()
+                        } else {
+                            format!("/{}", path)
+                        };
+                        if let Some(account) = self.config.accounts.first() {
+                            let root = expand_maildir_root(&account.maildir);
+                            let full = format!("{}{}", root, folder_path);
+                            let _ = std::fs::create_dir_all(format!("{}/cur", full));
+                            let _ = std::fs::create_dir_all(format!("{}/new", full));
+                            let _ = std::fs::create_dir_all(format!("{}/tmp", full));
+                            self.known_folders.push(folder_path.clone());
+                            self.known_folders.sort();
+                            self.mode = InputMode::Normal;
+                            self.navigate_folder(&folder_path).await?;
+                        } else {
+                            self.set_status("No account configured");
+                            self.mode = InputMode::FolderPicker;
+                        }
+                    }
+                }
+                InputMode::MoveToFolder => {
+                    let filtered = self.filtered_folders_plain();
+                    if let Some(folder) = filtered.get(self.folder_selected).cloned() {
+                        // Only move to real maildir folders (starting with /)
+                        if folder.starts_with('/') {
+                            self.mode = InputMode::Normal;
+                            self.triage_move(&folder, &format!("Moved to {}", folder))
+                                .await?;
+                        } else {
+                            self.set_status("Can only move to maildir folders");
+                        }
                     }
                 }
                 _ => {}
@@ -996,11 +1297,22 @@ impl App {
                         self.load_folder().await?;
                     }
                 }
-                InputMode::FolderPicker | InputMode::CommandPalette => {
+                InputMode::FolderPicker | InputMode::CommandPalette | InputMode::MoveToFolder => {
                     self.mode = InputMode::Normal;
                 }
                 InputMode::Help => {
                     self.mode = InputMode::Normal;
+                }
+                InputMode::SmartFolderCreate => {
+                    self.mode = InputMode::FolderPicker;
+                }
+                InputMode::SmartFolderName => {
+                    // Go back to query phase
+                    self.smart_create_phase = 0;
+                    self.mode = InputMode::SmartFolderCreate;
+                }
+                InputMode::MaildirCreate => {
+                    self.mode = InputMode::FolderPicker;
                 }
                 _ => {}
             },
@@ -1055,6 +1367,65 @@ impl App {
             Action::Noop => {}
         }
         Ok(())
+    }
+}
+
+/// Expand `~/` prefix in a maildir root path.
+fn expand_maildir_root(maildir: &str) -> String {
+    if let Some(rest) = maildir.strip_prefix("~/") {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{}/{}", home, rest)
+    } else {
+        maildir.to_string()
+    }
+}
+
+/// Save a formatted message to the Sent maildir folder.
+fn save_to_sent(maildir_root: &str, sent_folder: &str, message: &[u8]) -> Result<()> {
+    use anyhow::Context;
+    let root = expand_maildir_root(maildir_root);
+    let sent_cur = format!("{}{}/cur", root, sent_folder);
+
+    // Ensure the Sent/cur directory exists
+    std::fs::create_dir_all(&sent_cur)
+        .with_context(|| format!("failed to create {}", sent_cur))?;
+
+    // Maildir filename: time.pid_seq.hostname:2,S (Seen flag)
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let hostname = gethostname();
+    let filename = format!(
+        "{}.{}_{}.{}:2,S",
+        timestamp,
+        std::process::id(),
+        rand_seq(),
+        hostname,
+    );
+    let path = format!("{}/{}", sent_cur, filename);
+
+    std::fs::write(&path, message).with_context(|| format!("failed to save to {}", path))?;
+
+    Ok(())
+}
+
+/// Simple counter for unique maildir filenames within a process.
+fn rand_seq() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Get the system hostname (for maildir filenames).
+fn gethostname() -> String {
+    let mut buf = [0u8; 256];
+    let ret = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if ret == 0 {
+        let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        String::from_utf8_lossy(&buf[..len]).to_string()
+    } else {
+        "localhost".to_string()
     }
 }
 
@@ -1230,7 +1601,13 @@ pub async fn run(mut app: App) -> Result<()> {
             // Popup overlays — suppress hyperlinks when popups cover the content
             let has_popup = matches!(
                 app.mode,
-                InputMode::FolderPicker | InputMode::CommandPalette | InputMode::Help
+                InputMode::FolderPicker
+                    | InputMode::MoveToFolder
+                    | InputMode::CommandPalette
+                    | InputMode::Help
+                    | InputMode::SmartFolderCreate
+                    | InputMode::SmartFolderName
+                    | InputMode::MaildirCreate
             );
             if has_popup {
                 hyperlink_regions.clear();
@@ -1242,8 +1619,35 @@ pub async fn run(mut app: App) -> Result<()> {
                     folders: &filtered,
                     selected: app.folder_selected,
                     filter: &app.folder_filter,
+                    title: "Folders",
                 };
                 frame.render_widget(picker, size);
+            }
+            if app.mode == InputMode::MoveToFolder {
+                let filtered = app.filtered_folders_plain();
+                let picker = FolderPicker {
+                    folders: &filtered,
+                    selected: app.folder_selected,
+                    filter: &app.folder_filter,
+                    title: "Move to folder",
+                };
+                frame.render_widget(picker, size);
+            }
+            if matches!(app.mode, InputMode::SmartFolderCreate | InputMode::SmartFolderName) {
+                let popup = folder_picker::SmartFolderPopup {
+                    query: &app.smart_create_query,
+                    name: &app.smart_create_name,
+                    phase: app.smart_create_phase,
+                    preview: &app.smart_create_preview,
+                    count: app.smart_create_count,
+                };
+                frame.render_widget(popup, size);
+            }
+            if app.mode == InputMode::MaildirCreate {
+                let popup = folder_picker::MaildirCreatePopup {
+                    input: &app.maildir_create_input,
+                };
+                frame.render_widget(popup, size);
             }
             if app.mode == InputMode::CommandPalette {
                 let filtered = app.filtered_palette();
@@ -1296,27 +1700,51 @@ pub async fn run(mut app: App) -> Result<()> {
                                 compose::launch_editor(&tmp_path, &app.config.editor)
                                     .unwrap_or(false);
 
+                            // Send while terminal is still in normal mode so that
+                            // password_command (e.g. pass/gpg pinentry) can use the tty.
+                            let send_result = if modified {
+                                if let Ok(msg_content) = std::fs::read_to_string(&tmp_path) {
+                                    if let Some(acct) = app.config.accounts.first() {
+                                        use std::io::Write;
+                                        print!("Sending...");
+                                        let _ = io::stdout().flush();
+                                        match send::send_message(&msg_content, &acct.smtp).await {
+                                            Ok(formatted) => {
+                                                // Save to Sent maildir
+                                                if let Err(e) = save_to_sent(
+                                                    &acct.maildir,
+                                                    &acct.folders.sent,
+                                                    &formatted,
+                                                ) {
+                                                    println!("\nWarning: sent but failed to save to Sent folder: {}", e);
+                                                }
+                                                Some(Ok(()))
+                                            }
+                                            Err(e) => Some(Err(e)),
+                                        }
+                                    } else {
+                                        Some(Err(anyhow::anyhow!("No SMTP account configured")))
+                                    }
+                                } else {
+                                    Some(Err(anyhow::anyhow!("Failed to read compose file")))
+                                }
+                            } else {
+                                None
+                            };
+
                             terminal::enable_raw_mode()?;
                             io::stdout().execute(EnterAlternateScreen)?;
                             terminal.clear()?;
 
-                            if modified {
-                                if let Ok(msg_content) = std::fs::read_to_string(&tmp_path) {
-                                    if let Some(smtp_cfg) =
-                                        app.config.accounts.first().map(|a| &a.smtp)
-                                    {
-                                        match send::send_message(&msg_content, smtp_cfg).await {
-                                            Ok(()) => app.set_status("Message sent"),
-                                            Err(e) => {
-                                                app.set_status(format!("Send error: {}", e))
-                                            }
-                                        }
-                                    } else {
-                                        app.set_status("No SMTP config — message saved to temp");
-                                    }
+                            match send_result {
+                                Some(Ok(())) => {
+                                    app.set_status("Message sent");
+                                    app.needs_reindex = true;
                                 }
-                            } else {
-                                app.set_status("Compose cancelled");
+                                Some(Err(e)) => {
+                                    app.set_status(format!("Send error: {}", e))
+                                }
+                                None => app.set_status("Compose cancelled"),
                             }
                             let _ = std::fs::remove_file(&tmp_path);
                         }
@@ -1506,6 +1934,29 @@ pub async fn run(mut app: App) -> Result<()> {
                         app.folder_selected = app.folder_selected.saturating_sub(1);
                         continue;
                     }
+                    // Ctrl-D deletes the selected folder
+                    if key.code == crossterm::event::KeyCode::Char('d')
+                        && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                    {
+                        app.delete_selected_folder().await;
+                        continue;
+                    }
+                }
+                InputMode::MoveToFolder => {
+                    if key.code == crossterm::event::KeyCode::Down {
+                        let max = app.filtered_folders_plain().len();
+                        if app.folder_selected + 1 < max {
+                            app.folder_selected += 1;
+                        }
+                        continue;
+                    }
+                    if key.code == crossterm::event::KeyCode::Up {
+                        app.folder_selected = app.folder_selected.saturating_sub(1);
+                        continue;
+                    }
+                }
+                InputMode::SmartFolderCreate | InputMode::SmartFolderName | InputMode::MaildirCreate => {
+                    // These modes use text input only, no arrow key navigation
                 }
                 InputMode::CommandPalette => {
                     if key.code == crossterm::event::KeyCode::Down {
