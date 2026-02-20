@@ -145,6 +145,8 @@ Anytown, CA 90210
 #   "action_name"                     — built-in action (see list below)
 #   "/Folder/Path"                    — navigate to a maildir folder
 #   { shell = "cmd", reindex = true } — run a shell command
+#   { move = "archive" }              — move messages to a folder alias
+#   { move = "/Projects" }            — move messages to a literal path
 #
 # Key syntax:
 #   "e", "#", "G" (shift), "ctrl+r", "shift+space"
@@ -154,16 +156,21 @@ Anytown, CA 90210
 # [bindings] entries apply to both normal and thread view modes.
 # [bindings.normal] and [bindings.thread] override per-mode.
 #
-# Action names: archive, trash, spam, toggle_read, toggle_star, undo,
-#   move_down, move_up, jump_top, jump_bottom, scroll_preview_down,
-#   scroll_preview_up, half_page_down, half_page_up, full_page_down,
-#   full_page_up, go_inbox, go_archive, go_drafts, go_sent, go_trash,
-#   go_spam, go_folder_picker, search, filter_unread, filter_starred,
+# Action names: archive, trash, spam, move (open folder picker),
+#   toggle_read, toggle_star, undo, move_down, move_up, jump_top,
+#   jump_bottom, scroll_preview_down, scroll_preview_up,
+#   half_page_down, half_page_up, full_page_down, full_page_up,
+#   go_inbox, go_archive, go_drafts, go_sent, go_trash, go_spam,
+#   go_folder_picker, search, filter_unread, filter_starred,
 #   filter_needs_reply, toggle_select, select_down, select_up,
 #   open_thread, close_thread, thread_next, thread_prev,
 #   thread_toggle_expand, thread_expand_all, compose, reply, reply_all,
 #   forward, copy_message_url, copy_thread_url, open_in_browser,
 #   command_palette, help, sync, quit
+#
+# Folder aliases (used with "archive", "trash", "spam", or { move = "..." }):
+#   archive, trash, spam, inbox, sent, drafts
+#   These resolve to the paths in [accounts.folders] for the active account.
 
 [bindings]
 # Examples:
@@ -171,6 +178,8 @@ Anytown, CA 90210
 # "ctrl+t" = { shell = "tig", suspend = true }  # open tig (suspends TUI)
 # "g s" = "/Sent"                                # g then s → go to Sent
 # A = "archive"                                  # remap archive to A
+# P = { move = "/Projects" }                     # move to /Projects with P
+# I = { move = "inbox" }                         # move to inbox (uses account config)
 
 # ─── Default bindings (normal mode) ───────────────────────────────
 # Uncomment and change any of these to override the defaults.
@@ -191,6 +200,7 @@ Anytown, CA 90210
 # e         = "archive"
 # "#"       = "trash"
 # "!"       = "spam"
+# m         = "move"              # open folder picker to move messages
 # u         = "toggle_read"
 # s         = "toggle_star"
 # z         = "undo"
