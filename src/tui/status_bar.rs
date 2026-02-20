@@ -14,6 +14,8 @@ pub struct TopBar<'a> {
     pub total_count: usize,
     pub mode: &'a InputMode,
     pub thread_subject: Option<&'a str>,
+    /// Show account name when multiple accounts are configured.
+    pub account_name: Option<&'a str>,
 }
 
 impl<'a> Widget for TopBar<'a> {
@@ -42,13 +44,26 @@ impl<'a> Widget for TopBar<'a> {
         };
 
         // Render left-aligned label
-        let left_spans = Line::from(vec![Span::styled(
+        let mut spans = vec![Span::styled(
             &left,
             Style::default()
                 .bg(Color::Blue)
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
-        )]);
+        )];
+
+        // Show account indicator when multiple accounts exist
+        if let Some(name) = self.account_name {
+            spans.push(Span::styled(
+                format!(" [{}] ", name),
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        let left_spans = Line::from(spans);
         buf.set_line(area.x, area.y, &left_spans, area.width);
 
         // Render right-aligned count

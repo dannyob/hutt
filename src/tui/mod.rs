@@ -1688,12 +1688,18 @@ pub async fn run(mut app: App) -> Result<()> {
                 None
             };
             let unread = app.envelopes.iter().filter(|e| e.is_unread()).count();
+            let account_name = if app.config.accounts.len() > 1 {
+                app.account().map(|a| a.name.as_str())
+            } else {
+                None
+            };
             let top = TopBar {
                 folder: &app.current_folder,
                 unread_count: unread,
                 total_count: app.envelopes.len(),
                 mode: &app.mode,
                 thread_subject,
+                account_name,
             };
             frame.render_widget(top, outer[0]);
 
