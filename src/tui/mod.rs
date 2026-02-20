@@ -69,6 +69,9 @@ fn debug_log_path() -> Option<&'static str> {
 }
 
 pub struct App {
+    // Active account (index into config.accounts)
+    pub active_account: usize,
+
     // Core state
     pub current_folder: String,
     pub current_query: String,
@@ -175,6 +178,11 @@ struct ShellError {
 }
 
 impl App {
+    /// Return the active account config.
+    pub fn account(&self) -> Option<&crate::config::AccountConfig> {
+        self.config.accounts.get(self.active_account)
+    }
+
     pub async fn new(mu: MuClient, config: Config) -> Result<Self> {
         debug_log!("App::new: accounts={} editor={:?} bindings_global={} bindings_normal={} bindings_thread={}",
             config.accounts.len(), config.editor,
@@ -205,7 +213,9 @@ impl App {
             known_folders.push(format!("@{}", sf.name));
         }
 
+        let active_account = config.default_account_index();
         Ok(Self {
+            active_account,
             current_folder: "/Inbox".to_string(),
             current_query: String::new(),
             envelopes: Vec::new(),
@@ -294,7 +304,7 @@ impl App {
             }
         }
         // Scan maildir root recursively for all real folders
-        if let Some(account) = self.config.accounts.first() {
+        if let Some(account) = self.account() {
             let root = expand_maildir_root(&account.maildir);
             let root_path = std::path::PathBuf::from(&root);
             let mut stack = vec![root_path.clone()];
@@ -411,9 +421,7 @@ impl App {
             return (target.to_string(), desc);
         }
         let folders = self
-            .config
-            .accounts
-            .first()
+            .account()
             .map(|a| &a.folders);
         let (path, desc) = match target {
             "archive" => (
@@ -554,7 +562,7 @@ impl App {
                 }
                 UndoAction::DeleteMaildirFolder { path } => {
                     // Re-create the maildir directory structure
-                    if let Some(account) = self.config.accounts.first() {
+                    if let Some(account) = self.account() {
                         let root = expand_maildir_root(&account.maildir);
                         let full = format!("{}{}", root, path);
                         let _ = std::fs::create_dir_all(format!("{}/cur", full));
@@ -671,7 +679,7 @@ impl App {
             }
         } else if folder.starts_with('/') {
             // Maildir — check if empty, then delete
-            if let Some(account) = self.config.accounts.first() {
+            if let Some(account) = self.account() {
                 let root = expand_maildir_root(&account.maildir);
                 let full = format!("{}{}", root, folder);
                 let full_path = std::path::PathBuf::from(&full);
@@ -1329,7 +1337,7 @@ impl App {
                         } else {
                             format!("/{}", path)
                         };
-                        if let Some(account) = self.config.accounts.first() {
+                        if let Some(account) = self.account() {
                             let root = expand_maildir_root(&account.maildir);
                             let full = format!("{}{}", root, folder_path);
                             let _ = std::fs::create_dir_all(format!("{}/cur", full));
@@ -1757,9 +1765,7 @@ pub async fn run(mut app: App) -> Result<()> {
             };
             if let Some(ctx) = ctx {
                 let from_email = app
-                    .config
-                    .accounts
-                    .first()
+                    .account()
                     .map(|a| a.email.as_str())
                     .unwrap_or("user@example.com");
 
@@ -1779,7 +1785,7 @@ pub async fn run(mut app: App) -> Result<()> {
                             // password_command (e.g. pass/gpg pinentry) can use the tty.
                             let send_result = if modified {
                                 if let Ok(msg_content) = std::fs::read_to_string(&tmp_path) {
-                                    if let Some(acct) = app.config.accounts.first() {
+                                    if let Some(acct) = app.account() {
                                         use std::io::Write;
                                         print!("Sending...");
                                         let _ = io::stdout().flush();
