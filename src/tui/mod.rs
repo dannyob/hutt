@@ -135,6 +135,12 @@ pub struct ShellPending {
 
 impl App {
     pub async fn new(mu: MuClient, config: Config) -> Result<Self> {
+        debug_log!("App::new: accounts={} editor={:?} bindings_global={} bindings_normal={} bindings_thread={}",
+            config.accounts.len(), config.editor,
+            config.bindings.global.len(), config.bindings.normal.len(), config.bindings.thread.len());
+        if let Some(acct) = config.accounts.first() {
+            debug_log!("App::new: account[0] email={:?} maildir={:?}", acct.email, acct.maildir);
+        }
         let mut keymap = KeyMapper::new();
         keymap.load_bindings(&config.bindings);
 
@@ -184,8 +190,10 @@ impl App {
 
     pub async fn load_folder(&mut self) -> Result<()> {
         let query = self.build_query();
+        debug_log!("load_folder: query={:?} folder={:?}", query, self.current_folder);
         self.current_query = query.clone();
         self.envelopes = self.mu.find(&query, &FindOpts::default()).await?;
+        debug_log!("load_folder: got {} envelopes", self.envelopes.len());
         self.selected = 0;
         self.scroll_offset = 0;
         self.preview_scroll = 0;
@@ -952,17 +960,37 @@ impl App {
                         .output()
                         .await;
                     match output {
-                        Ok(o) if o.status.success() => {
-                            if reindex {
-                                let _ = self.mu.index(true).await;
-                                self.load_folder().await?;
-                            }
-                            self.set_status(format!("Done: {}", command));
-                        }
                         Ok(o) => {
-                            self.set_status(format!("Exited {}: {}", o.status, command));
+                            let stdout = String::from_utf8_lossy(&o.stdout);
+                            let stderr = String::from_utf8_lossy(&o.stderr);
+                            debug_log!("shell[{}]: exit={}", command, o.status);
+                            for line in stdout.lines() {
+                                debug_log!("shell[{}] stdout: {}", command, line);
+                            }
+                            for line in stderr.lines() {
+                                debug_log!("shell[{}] stderr: {}", command, line);
+                            }
+                            let last_line = stderr.lines().last()
+                                .or_else(|| stdout.lines().last())
+                                .unwrap_or("").to_string();
+                            if o.status.success() {
+                                if reindex {
+                                    let _ = self.mu.index(true).await;
+                                    self.load_folder().await?;
+                                }
+                                if last_line.is_empty() {
+                                    self.set_status(format!("Done: {}", command));
+                                } else {
+                                    self.set_status(last_line);
+                                }
+                            } else if last_line.is_empty() {
+                                self.set_status(format!("Exited {}: {}", o.status, command));
+                            } else {
+                                self.set_status(format!("Exit {}: {}", o.status, last_line));
+                            }
                         }
                         Err(e) => {
+                            debug_log!("shell[{}]: error={}", command, e);
                             self.set_status(format!("Failed: {}", e));
                         }
                     }
@@ -1228,11 +1256,18 @@ pub async fn run(mut app: App) -> Result<()> {
             terminal.clear()?;
 
             match status {
-                Ok(s) if s.success() => {
-                    app.set_status(format!("Done: {}", pending.command))
+                Ok(s) => {
+                    debug_log!("shell[{}]: exit={}", pending.command, s);
+                    if s.success() {
+                        app.set_status(format!("Done: {}", pending.command));
+                    } else {
+                        app.set_status(format!("Exited {}: {}", s, pending.command));
+                    }
                 }
-                Ok(s) => app.set_status(format!("Exited {}: {}", s, pending.command)),
-                Err(e) => app.set_status(format!("Failed: {}", e)),
+                Err(e) => {
+                    debug_log!("shell[{}]: error={}", pending.command, e);
+                    app.set_status(format!("Failed: {}", e));
+                }
             }
 
             if pending.reindex {

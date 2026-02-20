@@ -368,6 +368,77 @@ mod tests {
     }
 
     #[test]
+    fn parse_real_config_with_bindings() {
+        let toml_str = r#"
+            editor = "nvim"
+
+            [[accounts]]
+            name    = "almnck"
+            email   = "olddanny@almnck.com"
+            maildir = "~/Private/almnck-mail"
+
+            [accounts.smtp]
+            host             = "smtp.purelymail.com"
+            port             = 465
+            encryption       = "ssl"
+            username         = "olddanny@almnck.com"
+            password_command = "pass email/work"
+
+            [accounts.folders]
+            inbox   = "/Inbox"
+            archive = "/Archive"
+            drafts  = "/Drafts"
+            sent    = "/Sent"
+            trash   = "/Trash"
+            spam    = "/Junk"
+
+            [bindings]
+            G = { shell = "mbsync almnck", reindex = true }
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.accounts.len(), 1, "accounts should have 1 entry");
+        assert_eq!(cfg.accounts[0].name, "almnck");
+        assert_eq!(cfg.accounts[0].email, "olddanny@almnck.com");
+        assert_eq!(cfg.accounts[0].maildir, "~/Private/almnck-mail");
+        assert_eq!(cfg.accounts[0].smtp.host, "smtp.purelymail.com");
+        assert_eq!(cfg.accounts[0].folders.inbox, "/Inbox");
+        assert_eq!(cfg.bindings.global.len(), 1);
+        assert!(cfg.bindings.global.contains_key("G"));
+    }
+
+    #[test]
+    fn parse_config_without_bindings() {
+        // Same config but WITHOUT [bindings] — the way it used to work
+        let toml_str = r#"
+            editor = "nvim"
+
+            [[accounts]]
+            name    = "almnck"
+            email   = "olddanny@almnck.com"
+            maildir = "~/Private/almnck-mail"
+
+            [accounts.smtp]
+            host             = "smtp.purelymail.com"
+            port             = 465
+            encryption       = "ssl"
+            username         = "olddanny@almnck.com"
+            password_command = "pass email/work"
+
+            [accounts.folders]
+            inbox   = "/Inbox"
+            archive = "/Archive"
+            drafts  = "/Drafts"
+            sent    = "/Sent"
+            trash   = "/Trash"
+            spam    = "/Junk"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.accounts.len(), 1, "accounts should have 1 entry");
+        assert_eq!(cfg.accounts[0].maildir, "~/Private/almnck-mail");
+        assert!(cfg.bindings.global.is_empty());
+    }
+
+    #[test]
     fn smtp_defaults() {
         let smtp = SmtpConfig::default();
         assert_eq!(smtp.host, "localhost");
