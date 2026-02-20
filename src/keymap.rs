@@ -47,6 +47,10 @@ pub enum Action {
     GoSpam,
     GoFolderPicker,
 
+    // Account switching
+    NextAccount,
+    PrevAccount,
+
     // Search & Filters
     EnterSearch,
     FilterUnread,
@@ -246,6 +250,8 @@ pub fn parse_action_name(name: &str) -> Result<Action, String> {
         "go_trash" => Ok(Action::GoTrash),
         "go_spam" => Ok(Action::GoSpam),
         "go_folder_picker" => Ok(Action::GoFolderPicker),
+        "next_account" => Ok(Action::NextAccount),
+        "prev_account" => Ok(Action::PrevAccount),
         "enter_search" | "search" => Ok(Action::EnterSearch),
         "filter_unread" => Ok(Action::FilterUnread),
         "filter_starred" => Ok(Action::FilterStarred),
@@ -555,6 +561,9 @@ impl KeyMapper {
             (KeyCode::Char('g'), KeyCode::Char('#')) => Action::GoTrash,
             (KeyCode::Char('g'), KeyCode::Char('!')) => Action::GoSpam,
             (KeyCode::Char('g'), KeyCode::Char('l')) => Action::GoFolderPicker,
+            // g-prefix account switching
+            (KeyCode::Char('g'), KeyCode::Tab) => Action::NextAccount,
+            (KeyCode::Char('g'), KeyCode::BackTab) => Action::PrevAccount,
             _ => Action::Noop,
         }
     }
