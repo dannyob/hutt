@@ -136,7 +136,7 @@ pub struct App {
     pub status_time: Option<Instant>,
 
     // Compose pending (set by action handler, processed by run loop)
-    pub compose_pending: Option<compose::ComposeKind>,
+    pub compose_pending: Option<compose::ComposePending>,
 
     // Shell command pending (suspend=true, processed by run loop like compose)
     pub shell_pending: Option<ShellPending>,
@@ -925,7 +925,7 @@ impl App {
                         }];
                         ctx.subject = subject;
                         self.compose_pending =
-                            Some(compose::ComposeKind::NewMessage);
+                            Some(compose::ComposePending::Ready(ctx));
                         self.set_status("Compose from URL");
                     }
                 }
@@ -1121,10 +1121,10 @@ impl App {
             }
 
             // Compose
-            Action::Compose => self.compose_pending = Some(compose::ComposeKind::NewMessage),
-            Action::Reply => self.compose_pending = Some(compose::ComposeKind::Reply),
-            Action::ReplyAll => self.compose_pending = Some(compose::ComposeKind::ReplyAll),
-            Action::Forward => self.compose_pending = Some(compose::ComposeKind::Forward),
+            Action::Compose => self.compose_pending = Some(compose::ComposePending::Kind(compose::ComposeKind::NewMessage)),
+            Action::Reply => self.compose_pending = Some(compose::ComposePending::Kind(compose::ComposeKind::Reply)),
+            Action::ReplyAll => self.compose_pending = Some(compose::ComposePending::Kind(compose::ComposeKind::ReplyAll)),
+            Action::Forward => self.compose_pending = Some(compose::ComposePending::Kind(compose::ComposeKind::Forward)),
 
             // Linkability
             Action::CopyMessageUrl => {
@@ -1750,8 +1750,12 @@ pub async fn run(mut app: App) -> Result<()> {
         }
 
         // Handle compose (requires terminal suspend/resume)
-        if let Some(kind) = app.compose_pending.take() {
-            if let Some(ctx) = app.build_compose_context(&kind) {
+        if let Some(pending) = app.compose_pending.take() {
+            let ctx = match pending {
+                compose::ComposePending::Ready(ctx) => Some(ctx),
+                compose::ComposePending::Kind(kind) => app.build_compose_context(&kind),
+            };
+            if let Some(ctx) = ctx {
                 let from_email = app
                     .config
                     .accounts
