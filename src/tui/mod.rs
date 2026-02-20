@@ -124,6 +124,9 @@ pub struct App {
     // Shell command pending (suspend=true, processed by run loop like compose)
     pub shell_pending: Option<ShellPending>,
 
+    // Channel sender for background shell command results (receiver lives in run loop)
+    shell_tx: tokio::sync::mpsc::UnboundedSender<Result<ShellResult, ShellError>>,
+
     // Config
     pub config: Config,
 }
@@ -131,6 +134,21 @@ pub struct App {
 pub struct ShellPending {
     pub command: String,
     pub reindex: bool,
+}
+
+/// Result of a background (async) shell command.
+struct ShellResult {
+    command: String,
+    reindex: bool,
+    stdout: String,
+    stderr: String,
+    status: std::process::ExitStatus,
+}
+
+/// Error from a background shell command.
+struct ShellError {
+    command: String,
+    error: String,
 }
 
 impl App {
@@ -143,6 +161,8 @@ impl App {
         }
         let mut keymap = KeyMapper::new();
         keymap.load_bindings(&config.bindings);
+
+        let (shell_tx, _) = tokio::sync::mpsc::unbounded_channel();
 
         Ok(Self {
             current_folder: "/Inbox".to_string(),
@@ -184,6 +204,7 @@ impl App {
             status_time: None,
             compose_pending: None,
             shell_pending: None,
+            shell_tx,
             config,
         })
     }
@@ -954,46 +975,33 @@ impl App {
                     // Deferred to run loop (needs terminal suspend/resume)
                     self.shell_pending = Some(ShellPending { command, reindex });
                 } else {
-                    self.set_status(format!("Running: {}", command));
-                    let output = tokio::process::Command::new("sh")
-                        .args(["-c", &command])
-                        .output()
-                        .await;
-                    match output {
-                        Ok(o) => {
-                            let stdout = String::from_utf8_lossy(&o.stdout);
-                            let stderr = String::from_utf8_lossy(&o.stderr);
-                            debug_log!("shell[{}]: exit={}", command, o.status);
-                            for line in stdout.lines() {
-                                debug_log!("shell[{}] stdout: {}", command, line);
+                    // Spawn in background so the TUI stays responsive
+                    self.set_status(format!("Running: {}...", command));
+                    let tx = self.shell_tx.clone();
+                    let cmd = command.clone();
+                    tokio::spawn(async move {
+                        let output = tokio::process::Command::new("sh")
+                            .args(["-c", &cmd])
+                            .output()
+                            .await;
+                        match output {
+                            Ok(o) => {
+                                let _ = tx.send(Ok(ShellResult {
+                                    command: cmd,
+                                    reindex,
+                                    stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
+                                    stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
+                                    status: o.status,
+                                }));
                             }
-                            for line in stderr.lines() {
-                                debug_log!("shell[{}] stderr: {}", command, line);
-                            }
-                            let last_line = stderr.lines().last()
-                                .or_else(|| stdout.lines().last())
-                                .unwrap_or("").to_string();
-                            if o.status.success() {
-                                if reindex {
-                                    let _ = self.mu.index(true).await;
-                                    self.load_folder().await?;
-                                }
-                                if last_line.is_empty() {
-                                    self.set_status(format!("Done: {}", command));
-                                } else {
-                                    self.set_status(last_line);
-                                }
-                            } else if last_line.is_empty() {
-                                self.set_status(format!("Exited {}: {}", o.status, command));
-                            } else {
-                                self.set_status(format!("Exit {}: {}", o.status, last_line));
+                            Err(e) => {
+                                let _ = tx.send(Err(ShellError {
+                                    command: cmd,
+                                    error: e.to_string(),
+                                }));
                             }
                         }
-                        Err(e) => {
-                            debug_log!("shell[{}]: error={}", command, e);
-                            self.set_status(format!("Failed: {}", e));
-                        }
-                    }
+                    });
                 }
             }
 
@@ -1014,6 +1022,10 @@ pub async fn run(mut app: App) -> Result<()> {
     app.load_folder().await?;
 
     // Start IPC listener as a background task, sending commands through a channel
+    // Create shell result channel — replace the dummy one from App::new
+    let (shell_tx, mut shell_rx) = tokio::sync::mpsc::unbounded_channel();
+    app.shell_tx = shell_tx;
+
     let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<IpcCommand>();
     let _ipc_guard = match IpcListener::bind() {
         Ok(listener) => {
@@ -1304,6 +1316,44 @@ pub async fn run(mut app: App) -> Result<()> {
                     debug_log!("IPC select: {:?}", cmd);
                     if let Err(e) = app.handle_ipc_command(cmd).await {
                         app.set_status(format!("IPC error: {}", e));
+                    }
+                }
+                continue;
+            }
+            result = shell_rx.recv() => {
+                if let Some(result) = result {
+                    match result {
+                        Ok(r) => {
+                            debug_log!("shell[{}]: exit={}", r.command, r.status);
+                            for line in r.stdout.lines() {
+                                debug_log!("shell[{}] stdout: {}", r.command, line);
+                            }
+                            for line in r.stderr.lines() {
+                                debug_log!("shell[{}] stderr: {}", r.command, line);
+                            }
+                            let last_line = r.stderr.lines().last()
+                                .or_else(|| r.stdout.lines().last())
+                                .unwrap_or("");
+                            if r.status.success() {
+                                if r.reindex {
+                                    let _ = app.mu.index(true).await;
+                                    app.load_folder().await?;
+                                }
+                                if last_line.is_empty() {
+                                    app.set_status(format!("Done: {}", r.command));
+                                } else {
+                                    app.set_status(last_line.to_string());
+                                }
+                            } else if last_line.is_empty() {
+                                app.set_status(format!("Exited {}: {}", r.status, r.command));
+                            } else {
+                                app.set_status(format!("Exit {}: {}", r.status, last_line));
+                            }
+                        }
+                        Err(e) => {
+                            debug_log!("shell[{}]: error={}", e.command, e.error);
+                            app.set_status(format!("Failed: {}", e.error));
+                        }
                     }
                 }
                 continue;
