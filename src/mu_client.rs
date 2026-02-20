@@ -90,9 +90,14 @@ impl Default for FindOpts {
 
 impl MuClient {
     /// Spawn a mu server process and wait for the initial pong.
-    pub async fn start() -> Result<Self> {
-        let mut child = Command::new("mu")
-            .arg("server")
+    /// If `muhome` is Some, passes `--muhome <path>` to select a specific mu database.
+    pub async fn start(muhome: Option<&str>) -> Result<Self> {
+        let mut cmd = Command::new("mu");
+        cmd.arg("server");
+        if let Some(path) = muhome {
+            cmd.args(["--muhome", path]);
+        }
+        let mut child = cmd
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())

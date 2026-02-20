@@ -26,8 +26,12 @@ async fn main() -> Result<()> {
     // Load config
     let config = config::Config::load()?;
 
+    // Determine starting account and its muhome
+    let default_idx = config.default_account_index();
+    let muhome = config.effective_muhome(default_idx);
+
     // Start mu server
-    let mu = mu_client::MuClient::start().await?;
+    let mu = mu_client::MuClient::start(muhome.as_deref()).await?;
     let mut app = tui::App::new(mu, config).await?;
     app.current_folder = initial_folder;
     tui::run(app).await
