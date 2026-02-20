@@ -35,6 +35,7 @@ impl Default for Config {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct AccountConfig {
     pub name: String,
     pub email: String,
@@ -110,6 +111,7 @@ impl Default for FolderConfig {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct Snippet {
     pub trigger: String,
     pub body: String,

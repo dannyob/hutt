@@ -18,6 +18,7 @@ pub enum ComposeKind {
 
 /// Everything needed to build the compose buffer.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ComposeContext {
     pub kind: ComposeKind,
     pub to: Vec<Address>,
@@ -247,6 +248,7 @@ pub fn launch_editor(file_path: &Path, editor: &str) -> Result<bool> {
 
 /// Launch the editor in a split/new window if running inside kitty or tmux,
 /// otherwise fall back to a regular blocking editor launch.
+#[allow(dead_code)]
 pub fn launch_editor_split(file_path: &Path, editor: &str) -> Result<()> {
     let file_str = file_path
         .to_str()

@@ -71,6 +71,7 @@ pub fn flags_from_string(s: &str) -> Vec<Flag> {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ThreadMeta {
     pub level: u32,
     pub root: bool,
@@ -88,6 +89,7 @@ impl Default for ThreadMeta {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Envelope {
     pub docid: u32,
     pub message_id: String,

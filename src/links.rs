@@ -37,6 +37,7 @@ pub fn format_search_url(query: &str) -> String {
 }
 
 /// Format a `hutt://compose?to=<to>&subject=<subject>` URL.
+#[allow(dead_code)]
 pub fn format_compose_url(to: &str, subject: &str) -> String {
     format!(
         "hutt://compose?to={}&subject={}",
@@ -46,6 +47,7 @@ pub fn format_compose_url(to: &str, subject: &str) -> String {
 }
 
 /// Parse a `hutt://` URL into a `HuttUrl`, returning `None` if it's not valid.
+#[allow(dead_code)]
 pub fn parse_hutt_url(url: &str) -> Option<HuttUrl> {
     let rest = url.strip_prefix("hutt://")?;
 
@@ -108,6 +110,7 @@ pub fn open_html_in_browser(html: &[u8]) -> Result<()> {
 }
 
 /// Open a URL (or file path) in the default browser / handler.
+#[allow(dead_code)]
 pub fn open_url(url: &str) -> Result<()> {
     open_path(url)
 }
@@ -235,6 +238,7 @@ impl Drop for IpcListener {
 }
 
 /// Client side: connect to the running hutt instance and send a command.
+#[allow(dead_code)]
 pub async fn send_ipc_command(cmd: &IpcCommand) -> Result<()> {
     let path = socket_path();
     if !path.exists() {
@@ -264,6 +268,7 @@ pub async fn send_ipc_command(cmd: &IpcCommand) -> Result<()> {
 /// Install a minimal .app bundle in ~/Applications that registers the
 /// `hutt://` URL scheme on macOS.  The app is a shell script that forwards
 /// the URL to the running hutt instance via the IPC socket.
+#[allow(dead_code)]
 pub fn install_macos_handler() -> Result<()> {
     let home = std::env::var("HOME").context("HOME not set")?;
     let app_dir = PathBuf::from(&home).join("Applications/Hutt Opener.app");
@@ -402,6 +407,7 @@ fn url_encode(s: &str) -> String {
     out
 }
 
+#[allow(dead_code)]
 fn url_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(s.len());
     let bytes = s.as_bytes();
@@ -428,6 +434,7 @@ fn hex_digit(n: u8) -> char {
     }
 }
 
+#[allow(dead_code)]
 fn from_hex(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
@@ -437,6 +444,7 @@ fn from_hex(b: u8) -> Option<u8> {
     }
 }
 
+#[allow(dead_code)]
 fn parse_query_string(qs: &str) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     for pair in qs.split('&') {
