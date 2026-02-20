@@ -88,6 +88,58 @@ impl Default for FindOpts {
     }
 }
 
+/// Check if a mu database exists at `muhome`, and if not, run `mu init` and `mu index`.
+/// Called before starting the mu server for an account.
+pub async fn ensure_mu_database(muhome: Option<&str>, maildir: &str) -> Result<()> {
+    let muhome = match muhome {
+        Some(path) => path,
+        None => return Ok(()), // system default, assume already initialized
+    };
+
+    let db_dir = std::path::PathBuf::from(muhome).join("xapian");
+    if db_dir.is_dir() {
+        return Ok(()); // database exists
+    }
+
+    eprintln!("No mu database found at {}. Initializing...", muhome);
+
+    // Expand ~ in maildir
+    let expanded_maildir = if let Some(rest) = maildir.strip_prefix("~/") {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{}/{}", home, rest)
+    } else {
+        maildir.to_string()
+    };
+
+    // Ensure muhome directory exists
+    std::fs::create_dir_all(muhome)
+        .with_context(|| format!("failed to create muhome directory {}", muhome))?;
+
+    // Run mu init
+    let status = tokio::process::Command::new("mu")
+        .args(["init", "--muhome", muhome, "--maildir", &expanded_maildir])
+        .status()
+        .await
+        .context("failed to run mu init")?;
+    if !status.success() {
+        bail!("mu init failed with status {}", status);
+    }
+
+    // Run mu index
+    eprintln!("Running initial mu index...");
+    let status = tokio::process::Command::new("mu")
+        .args(["index", "--muhome", muhome])
+        .status()
+        .await
+        .context("failed to run mu index")?;
+    if !status.success() {
+        bail!("mu index failed with status {}", status);
+    }
+
+    eprintln!("mu database initialized.");
+    Ok(())
+}
+
 impl MuClient {
     /// Spawn a mu server process and wait for the initial pong.
     /// If `muhome` is Some, passes `--muhome <path>` to select a specific mu database.
