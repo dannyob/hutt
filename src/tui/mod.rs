@@ -466,6 +466,22 @@ impl App {
         Ok(())
     }
 
+    /// Return the folder `delta` positions from the current one in the
+    /// sorted known_folders list, wrapping around.
+    fn next_folder(&self, delta: i32) -> Option<String> {
+        if self.known_folders.is_empty() {
+            return None;
+        }
+        let cur = self
+            .known_folders
+            .iter()
+            .position(|f| f == &self.current_folder)
+            .unwrap_or(0);
+        let len = self.known_folders.len() as i32;
+        let next = ((cur as i32 + delta) % len + len) % len;
+        Some(self.known_folders[next as usize].clone())
+    }
+
     // ── Search ──────────────────────────────────────────────────────
 
     async fn execute_search(&mut self) -> Result<()> {
@@ -1455,6 +1471,26 @@ pub async fn run(mut app: App) -> Result<()> {
                 continue;
             }
             last_key_time = Instant::now();
+
+            // Tab / Shift+Tab: cycle through folders in normal/thread mode
+            if matches!(app.mode, InputMode::Normal | InputMode::ThreadView) {
+                if key.code == crossterm::event::KeyCode::Tab {
+                    if let Some(folder) = app.next_folder(1) {
+                        if let Err(e) = app.navigate_folder(&folder).await {
+                            app.set_status(format!("Error: {}", e));
+                        }
+                    }
+                    continue;
+                }
+                if key.code == crossterm::event::KeyCode::BackTab {
+                    if let Some(folder) = app.next_folder(-1) {
+                        if let Err(e) = app.navigate_folder(&folder).await {
+                            app.set_status(format!("Error: {}", e));
+                        }
+                    }
+                    continue;
+                }
+            }
 
             // In popup modes, handle arrow keys for navigation before passing to keymap
             match app.mode {
