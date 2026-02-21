@@ -16,6 +16,9 @@ pub struct Config {
     pub snippets: Vec<Snippet>,
     #[serde(default)]
     pub bindings: BindingsSection,
+    /// Start in conversations (grouped threads) mode.
+    #[serde(default)]
+    pub conversations: bool,
 }
 
 impl Default for Config {
@@ -26,6 +29,7 @@ impl Default for Config {
             sync_command: None,
             snippets: Vec::new(),
             bindings: BindingsSection::default(),
+            conversations: false,
         }
     }
 }

@@ -15,6 +15,12 @@
 # Default: "nvim"
 editor = "nvim"
 
+# Start in conversations (grouped threads) mode.
+# When enabled, messages are grouped by thread into single rows.
+# Toggle at runtime with V (Shift+V).
+# Default: false
+# conversations = true
+
 # Shell command to sync mail before refreshing the envelope list.
 # Hutt runs this when you press Ctrl-R (SyncMail).
 # Leave unset (or comment out) if you handle sync externally.
@@ -175,7 +181,7 @@ Anytown, CA 90210
 #   open_thread, close_thread, thread_next, thread_prev,
 #   thread_toggle_expand, thread_expand_all, compose, reply, reply_all,
 #   forward, copy_message_url, copy_thread_url, open_in_browser,
-#   command_palette, help, sync, quit
+#   command_palette, toggle_conversations, help, sync, quit
 #
 # Folder aliases (used with "archive", "trash", "spam", or { move = "..." }):
 #   archive, trash, spam, inbox, sent, drafts
@@ -242,6 +248,7 @@ Anytown, CA 90210
 #
 # Thread & preview
 # enter     = "open_thread"
+# V         = "toggle_conversations"
 #
 # Compose
 # c         = "compose"
