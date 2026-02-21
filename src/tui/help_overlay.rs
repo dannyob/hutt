@@ -72,6 +72,7 @@ const SECTIONS: &[HelpSection] = &[
         title: "Thread",
         keys: &[
             ("Enter", "Open thread"),
+            ("V", "Toggle conversations"),
             ("o", "Toggle expand"),
             ("O", "Expand/collapse all"),
             ("q / Esc", "Close thread"),

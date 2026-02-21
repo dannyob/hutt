@@ -88,6 +88,9 @@ pub enum Action {
     // Command palette (Phase 4)
     OpenCommandPalette,
 
+    // Conversations
+    ToggleConversations,
+
     // Help
     ShowHelp,
 
@@ -279,6 +282,7 @@ pub fn parse_action_name(name: &str) -> Result<Action, String> {
         "copy_thread_url" => Ok(Action::CopyThreadUrl),
         "open_in_browser" => Ok(Action::OpenInBrowser),
         "open_command_palette" | "command_palette" => Ok(Action::OpenCommandPalette),
+        "toggle_conversations" | "conversations" => Ok(Action::ToggleConversations),
         "show_help" | "help" => Ok(Action::ShowHelp),
         "sync_mail" | "sync" => Ok(Action::SyncMail),
         "quit" => Ok(Action::Quit),
@@ -543,6 +547,9 @@ impl KeyMapper {
 
             // Sync
             (KeyCode::Char('r'), KeyModifiers::CONTROL) => Action::SyncMail,
+
+            // Conversations
+            (KeyCode::Char('V'), KeyModifiers::SHIFT) => Action::ToggleConversations,
 
             // Help
             (KeyCode::Char('?'), _) => Action::ShowHelp,

@@ -190,8 +190,9 @@ fn parse_flags(value: &Value) -> Vec<Flag> {
 fn parse_thread_meta(value: &Value) -> ThreadMeta {
     ThreadMeta {
         level: plist_get_u32(value, "level").unwrap_or(0),
-        root: plist_get_bool(value, "root").unwrap_or(true),
-        thread_subject: plist_get_bool(value, "thread-subject").unwrap_or(true),
+        // mu omits :root when false, so absent means non-root
+        root: plist_get_bool(value, "root").unwrap_or(false),
+        thread_subject: plist_get_bool(value, "thread-subject").unwrap_or(false),
     }
 }
 

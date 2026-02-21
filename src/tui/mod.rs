@@ -28,7 +28,7 @@ use std::collections::HashMap;
 
 use crate::compose;
 use crate::config::Config;
-use crate::envelope::{flags_from_string, Envelope};
+use crate::envelope::{flags_from_string, group_into_conversations, Conversation, Envelope};
 use crate::keymap::{Action, InputMode, KeyMapper};
 use crate::links::{self, HuttUrl, IpcCommand, IpcListener};
 use crate::mime_render::{self, RenderCache};
@@ -38,7 +38,7 @@ use crate::smart_folders::{self, SmartFolder};
 use crate::undo::{UndoAction, UndoEntry, UndoStack};
 
 use self::command_palette::{CommandPalette, PaletteEntry};
-use self::envelope_list::EnvelopeList;
+use self::envelope_list::{ConversationList, EnvelopeList};
 use self::folder_picker::FolderPicker;
 use self::help_overlay::HelpOverlay;
 use self::preview::PreviewPane;
@@ -130,6 +130,10 @@ pub struct App {
     pub palette_filter: String,
     pub palette_selected: usize,
     pub palette_entries: Vec<PaletteEntry>,
+
+    // Conversations (grouped threads) mode
+    pub conversations_mode: bool,
+    pub conversations: Vec<Conversation>,
 
     // Help overlay
     pub help_scroll: u16,
@@ -255,6 +259,8 @@ impl App {
             smart_create_preview: Vec::new(),
             smart_create_count: None,
             maildir_create_input: String::new(),
+            conversations_mode: config.conversations,
+            conversations: Vec::new(),
             palette_filter: String::new(),
             palette_selected: 0,
             palette_entries: PaletteEntry::all_actions(),
@@ -279,6 +285,7 @@ impl App {
         self.selected = 0;
         self.scroll_offset = 0;
         self.preview_scroll = 0;
+        self.rebuild_conversations();
         self.collect_known_folders();
         Ok(())
     }
@@ -345,11 +352,11 @@ impl App {
     }
 
     fn selected_envelope(&self) -> Option<&Envelope> {
-        self.envelopes.get(self.selected)
+        self.preview_envelope()
     }
 
     fn ensure_preview_loaded(&mut self, width: u16) {
-        let envelope = match self.envelopes.get(self.selected) {
+        let envelope = match self.preview_envelope() {
             Some(e) => e,
             None => return,
         };
@@ -381,6 +388,30 @@ impl App {
         }
     }
 
+    fn rebuild_conversations(&mut self) {
+        self.conversations = group_into_conversations(&self.envelopes);
+    }
+
+    /// Number of visible rows: conversations or envelopes depending on mode.
+    fn visible_count(&self) -> usize {
+        if self.conversations_mode {
+            self.conversations.len()
+        } else {
+            self.envelopes.len()
+        }
+    }
+
+    /// The envelope to show in the preview pane.
+    fn preview_envelope(&self) -> Option<&Envelope> {
+        if self.conversations_mode {
+            self.conversations
+                .get(self.selected)
+                .map(|c| c.representative())
+        } else {
+            self.envelopes.get(self.selected)
+        }
+    }
+
     fn filter_description(&self) -> Option<String> {
         let mut parts = Vec::new();
         if self.filter_unread {
@@ -402,7 +433,7 @@ impl App {
     // ── Navigation ──────────────────────────────────────────────────
 
     fn move_down(&mut self) {
-        if self.selected + 1 < self.envelopes.len() {
+        if self.selected + 1 < self.visible_count() {
             self.selected += 1;
             self.preview_scroll = 0;
         }
@@ -482,6 +513,7 @@ impl App {
         }
         let removed: HashSet<u32> = targets.iter().map(|(d, _, _)| *d).collect();
         self.envelopes.retain(|e| !removed.contains(&e.docid));
+        self.rebuild_conversations();
         self.selected_set.clear();
         self.clamp_selection();
         self.preview_scroll = 0;
@@ -527,6 +559,17 @@ impl App {
                 .filter(|e| self.selected_set.contains(&e.docid))
                 .map(|e| (e.docid, e.maildir.clone(), e.flags_string()))
                 .collect()
+        } else if self.conversations_mode {
+            // In conversations mode, act on all messages in the selected conversation
+            if let Some(convo) = self.conversations.get(self.selected) {
+                convo
+                    .messages
+                    .iter()
+                    .map(|e| (e.docid, e.maildir.clone(), e.flags_string()))
+                    .collect()
+            } else {
+                vec![]
+            }
         } else if let Some(e) = self.envelopes.get(self.selected) {
             vec![(e.docid, e.maildir.clone(), e.flags_string())]
         } else {
@@ -535,8 +578,9 @@ impl App {
     }
 
     fn clamp_selection(&mut self) {
-        if !self.envelopes.is_empty() && self.selected >= self.envelopes.len() {
-            self.selected = self.envelopes.len() - 1;
+        let count = self.visible_count();
+        if count > 0 && self.selected >= count {
+            self.selected = count - 1;
         }
     }
 
@@ -804,7 +848,7 @@ impl App {
     // ── Thread view ─────────────────────────────────────────────────
 
     async fn open_thread(&mut self) -> Result<()> {
-        let envelope = match self.envelopes.get(self.selected) {
+        let envelope = match self.preview_envelope() {
             Some(e) => e.clone(),
             None => return Ok(()),
         };
@@ -859,7 +903,22 @@ impl App {
     // ── Multi-select ────────────────────────────────────────────────
 
     fn toggle_select(&mut self) {
-        if let Some(e) = self.envelopes.get(self.selected) {
+        if self.conversations_mode {
+            // Select/deselect all docids in the conversation
+            if let Some(convo) = self.conversations.get(self.selected) {
+                let docids = convo.all_docids();
+                let all_selected = docids.iter().all(|d| self.selected_set.contains(d));
+                if all_selected {
+                    for d in docids {
+                        self.selected_set.remove(&d);
+                    }
+                } else {
+                    for d in docids {
+                        self.selected_set.insert(d);
+                    }
+                }
+            }
+        } else if let Some(e) = self.envelopes.get(self.selected) {
             let docid = e.docid;
             if self.selected_set.contains(&docid) {
                 self.selected_set.remove(&docid);
@@ -1050,8 +1109,9 @@ impl App {
                 self.preview_scroll = 0;
             }
             Action::JumpBottom => {
-                if !self.envelopes.is_empty() {
-                    self.selected = self.envelopes.len() - 1;
+                let count = self.visible_count();
+                if count > 0 {
+                    self.selected = count - 1;
                     self.preview_scroll = 0;
                 }
             }
@@ -1078,11 +1138,8 @@ impl App {
                 }
             },
             Action::HalfPageDown => {
-                let max = if self.envelopes.is_empty() {
-                    0
-                } else {
-                    self.envelopes.len() - 1
-                };
+                let count = self.visible_count();
+                let max = if count == 0 { 0 } else { count - 1 };
                 self.selected = (self.selected + 10).min(max);
                 self.preview_scroll = 0;
             }
@@ -1091,11 +1148,8 @@ impl App {
                 self.preview_scroll = 0;
             }
             Action::FullPageDown => {
-                let max = if self.envelopes.is_empty() {
-                    0
-                } else {
-                    self.envelopes.len() - 1
-                };
+                let count = self.visible_count();
+                let max = if count == 0 { 0 } else { count - 1 };
                 self.selected = (self.selected + 20).min(max);
                 self.preview_scroll = 0;
             }
@@ -1283,6 +1337,21 @@ impl App {
                         }
                         Err(e) => self.set_status(format!("Read error: {}", e)),
                     }
+                }
+            }
+
+            // Conversations
+            Action::ToggleConversations => {
+                self.conversations_mode = !self.conversations_mode;
+                self.selected = 0;
+                self.scroll_offset = 0;
+                self.preview_scroll = 0;
+                self.selected_set.clear();
+                self.rebuild_conversations();
+                if self.conversations_mode {
+                    self.set_status("Conversations view");
+                } else {
+                    self.set_status("Message view");
                 }
             }
 
@@ -1714,10 +1783,11 @@ pub async fn run(mut app: App) -> Result<()> {
             let top = TopBar {
                 folder: &app.current_folder,
                 unread_count: unread,
-                total_count: app.envelopes.len(),
+                total_count: app.visible_count(),
                 mode: &app.mode,
                 thread_subject,
                 account_name,
+                conversations_mode: app.conversations_mode,
             };
             frame.render_widget(top, outer[0]);
 
@@ -1741,24 +1811,43 @@ pub async fn run(mut app: App) -> Result<()> {
                         .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
                         .split(outer[1]);
 
-                    let env_list = EnvelopeList {
-                        envelopes: &app.envelopes,
-                        selected: app.selected,
-                        offset: app.scroll_offset,
-                        multi_selected: &app.selected_set,
-                    };
-                    frame.render_widget(env_list, content[0]);
+                    if app.conversations_mode {
+                        let conv_list = ConversationList {
+                            conversations: &app.conversations,
+                            selected: app.selected,
+                            offset: app.scroll_offset,
+                            multi_selected: &app.selected_set,
+                        };
+                        frame.render_widget(conv_list, content[0]);
 
-                    let height = content[0].height as usize;
-                    let (new_offset, _) = EnvelopeList::visible_range(
-                        app.selected,
-                        app.scroll_offset,
-                        height,
-                        app.envelopes.len(),
-                    );
-                    app.scroll_offset = new_offset;
+                        let height = content[0].height as usize;
+                        let (new_offset, _) = EnvelopeList::visible_range(
+                            app.selected,
+                            app.scroll_offset,
+                            height,
+                            app.conversations.len(),
+                        );
+                        app.scroll_offset = new_offset;
+                    } else {
+                        let env_list = EnvelopeList {
+                            envelopes: &app.envelopes,
+                            selected: app.selected,
+                            offset: app.scroll_offset,
+                            multi_selected: &app.selected_set,
+                        };
+                        frame.render_widget(env_list, content[0]);
 
-                    let envelope = app.selected_envelope();
+                        let height = content[0].height as usize;
+                        let (new_offset, _) = EnvelopeList::visible_range(
+                            app.selected,
+                            app.scroll_offset,
+                            height,
+                            app.envelopes.len(),
+                        );
+                        app.scroll_offset = new_offset;
+                    }
+
+                    let envelope = app.preview_envelope();
                     let body = envelope
                         .and_then(|e| app.preview_cache.get(&e.message_id, preview_width));
                     let preview = PreviewPane {
@@ -1794,6 +1883,7 @@ pub async fn run(mut app: App) -> Result<()> {
                 status_message: app.status_message.as_deref(),
                 filter_desc: filter_desc.as_deref(),
                 selection_count: app.selected_set.len(),
+                conversations_mode: app.conversations_mode,
             };
             frame.render_widget(bottom, outer[2]);
 

@@ -16,6 +16,7 @@ pub struct TopBar<'a> {
     pub thread_subject: Option<&'a str>,
     /// Show account name when multiple accounts are configured.
     pub account_name: Option<&'a str>,
+    pub conversations_mode: bool,
 }
 
 impl<'a> Widget for TopBar<'a> {
@@ -37,10 +38,15 @@ impl<'a> Widget for TopBar<'a> {
             }
         };
 
+        let unit = if self.conversations_mode {
+            "threads"
+        } else {
+            "messages"
+        };
         let right = if self.unread_count > 0 {
             format!(" {}/{} unread ", self.unread_count, self.total_count)
         } else {
-            format!(" {} messages ", self.total_count)
+            format!(" {} {} ", self.total_count, unit)
         };
 
         // Render left-aligned label
@@ -82,13 +88,17 @@ pub struct BottomBar<'a> {
     pub status_message: Option<&'a str>,
     pub filter_desc: Option<&'a str>,
     pub selection_count: usize,
+    pub conversations_mode: bool,
 }
 
 impl<'a> BottomBar<'a> {
     fn hints_for_mode(&self) -> &'static str {
         match self.mode {
+            InputMode::Normal if self.conversations_mode => {
+                "j/k:nav e:archive #:trash s:star /:search V:messages ?:help"
+            }
             InputMode::Normal => {
-                "j/k:nav e:archive #:trash s:star /:search Enter:thread ?:help"
+                "j/k:nav e:archive #:trash s:star /:search V:conversations ?:help"
             }
             InputMode::Search => "Type to search | Enter:submit Esc:cancel",
             InputMode::ThreadView => {

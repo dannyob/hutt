@@ -226,6 +226,12 @@ impl PaletteEntry {
                 shortcut: Some("Enter".into()),
                 action: Action::OpenThread,
             },
+            PaletteEntry {
+                name: "Toggle Conversations".into(),
+                description: "Switch between message and conversation view".into(),
+                shortcut: Some("V".into()),
+                action: Action::ToggleConversations,
+            },
             // Compose
             PaletteEntry {
                 name: "Compose".into(),
