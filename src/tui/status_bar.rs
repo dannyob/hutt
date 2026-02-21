@@ -100,7 +100,7 @@ impl<'a> BottomBar<'a> {
             InputMode::Normal => {
                 "j/k:nav e:archive #:trash s:star /:search V:conversations ?:help"
             }
-            InputMode::Search => "Type to search | Enter:submit Esc:cancel",
+            InputMode::Search => "Type to search | ↑↓:history Enter:submit Esc:cancel",
             InputMode::ThreadView => {
                 "j/k:nav o:expand e:archive r:reply q:back ?:help"
             }
