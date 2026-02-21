@@ -1245,7 +1245,16 @@ impl App {
 
             // Search
             Action::EnterSearch => {
-                self.search_input.clear();
+                // Pre-fill with the current view's query
+                self.search_input = if let Some(q) =
+                    self.smart_folder_queries.get(&self.current_folder)
+                {
+                    format!("{} ", q)
+                } else if self.current_folder.starts_with('/') {
+                    format!("maildir:{} ", self.current_folder)
+                } else {
+                    format!("{} ", self.current_folder)
+                };
                 self.search_history_index = None;
                 self.mode = InputMode::Search;
             }
