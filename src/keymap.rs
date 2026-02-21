@@ -110,8 +110,11 @@ pub enum Action {
     InputBackspace,
     InputSubmit,
     InputCancel,
+    InputHistoryPrev,
+    InputHistoryNext,
 
     // System
+    Redraw,
     Quit,
     Noop,
 }
@@ -548,6 +551,9 @@ impl KeyMapper {
             // Sync
             (KeyCode::Char('r'), KeyModifiers::CONTROL) => Action::SyncMail,
 
+            // Redraw
+            (KeyCode::Char('l'), KeyModifiers::CONTROL) => Action::Redraw,
+
             // Conversations
             (KeyCode::Char('V'), KeyModifiers::SHIFT) => Action::ToggleConversations,
 
@@ -590,6 +596,8 @@ impl KeyMapper {
             KeyCode::Esc => Action::InputCancel,
             KeyCode::Enter => Action::InputSubmit,
             KeyCode::Backspace => Action::InputBackspace,
+            KeyCode::Up => Action::InputHistoryPrev,
+            KeyCode::Down => Action::InputHistoryNext,
             KeyCode::Char(c) => {
                 // Allow Ctrl+C to quit even in input mode
                 if c == 'c' && key.modifiers.contains(KeyModifiers::CONTROL) {

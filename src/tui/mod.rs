@@ -96,6 +96,8 @@ pub struct App {
     // Search
     pub search_input: String,
     pub previous_folder: Option<String>,
+    pub search_history: Vec<String>,
+    pub search_history_index: Option<usize>,
 
     // Filters
     pub filter_unread: bool,
@@ -242,6 +244,8 @@ impl App {
             selected_set: HashSet::new(),
             search_input: String::new(),
             previous_folder: None,
+            search_history: Vec::new(),
+            search_history_index: None,
             filter_unread: false,
             filter_starred: false,
             filter_needs_reply: false,
@@ -744,6 +748,11 @@ impl App {
             self.mode = InputMode::Normal;
             return Ok(());
         }
+        // Add to history (avoid consecutive duplicates)
+        if self.search_history.last() != Some(&self.search_input) {
+            self.search_history.push(self.search_input.clone());
+        }
+        self.search_history_index = None;
         self.previous_folder = Some(self.current_folder.clone());
         self.current_folder = self.search_input.clone();
         self.mode = InputMode::Normal;
@@ -1237,6 +1246,7 @@ impl App {
             // Search
             Action::EnterSearch => {
                 self.search_input.clear();
+                self.search_history_index = None;
                 self.mode = InputMode::Search;
             }
 
@@ -1458,6 +1468,30 @@ impl App {
                 }
                 _ => {}
             },
+            Action::InputHistoryPrev => {
+                if self.mode == InputMode::Search && !self.search_history.is_empty() {
+                    let idx = match self.search_history_index {
+                        None => self.search_history.len() - 1,
+                        Some(0) => 0,
+                        Some(i) => i - 1,
+                    };
+                    self.search_history_index = Some(idx);
+                    self.search_input = self.search_history[idx].clone();
+                }
+            }
+            Action::InputHistoryNext => {
+                if self.mode == InputMode::Search {
+                    if let Some(idx) = self.search_history_index {
+                        if idx + 1 < self.search_history.len() {
+                            self.search_history_index = Some(idx + 1);
+                            self.search_input = self.search_history[idx + 1].clone();
+                        } else {
+                            self.search_history_index = None;
+                            self.search_input.clear();
+                        }
+                    }
+                }
+            }
             Action::InputSubmit => match self.mode {
                 InputMode::Search => self.execute_search().await?,
                 InputMode::FolderPicker => {
@@ -1625,6 +1659,7 @@ impl App {
             }
 
             // System
+            Action::Redraw => {} // handled in run loop
             Action::Quit => self.should_quit = true,
             Action::Noop => {}
         }
@@ -2246,6 +2281,10 @@ pub async fn run(mut app: App) -> Result<()> {
             }
 
             let action = app.keymap.handle(key, &app.mode);
+            if action == Action::Redraw {
+                terminal.clear()?;
+                continue;
+            }
             if let Err(e) = app.handle_action(action).await {
                 app.set_status(format!("Error: {}", e));
             }
