@@ -1093,6 +1093,7 @@ impl App {
         let mut result = Vec::new();
         // Special entries always at top (not affected by filter)
         result.push("+ New smart folder".to_string());
+        result.push("+ New split".to_string());
         result.push("+ New maildir folder".to_string());
         // Then filtered known folders
         for f in &self.known_folders {
@@ -1632,6 +1633,15 @@ impl App {
                             self.smart_create_phase = 0;
                             self.smart_create_preview.clear();
                             self.smart_create_count = None;
+                            self.creating_split = false;
+                            self.mode = InputMode::SmartFolderCreate;
+                        } else if folder == "+ New split" {
+                            self.smart_create_query.clear();
+                            self.smart_create_name.clear();
+                            self.smart_create_phase = 0;
+                            self.smart_create_preview.clear();
+                            self.smart_create_count = None;
+                            self.creating_split = true;
                             self.mode = InputMode::SmartFolderCreate;
                         } else if folder == "+ New maildir folder" {
                             self.maildir_create_input.clear();
@@ -1661,18 +1671,35 @@ impl App {
                     let name = self.smart_create_name.trim().to_string();
                     let query = self.smart_create_query.trim().to_string();
                     if !name.is_empty() && !query.is_empty() {
-                        let sf = SmartFolder {
-                            name: name.clone(),
-                            query: query.clone(),
-                        };
-                        self.smart_folders.push(sf);
-                        smart_folders::save_smart_folders(&self.smart_folders, self.account_name());
-                        let key = format!("@{}", name);
-                        self.smart_folder_queries.insert(key.clone(), query);
-                        self.known_folders.push(key.clone());
-                        self.known_folders.sort();
-                        self.mode = InputMode::Normal;
-                        self.navigate_folder(&key).await?;
+                        if self.creating_split {
+                            let split = Split {
+                                name: name.clone(),
+                                query: query.clone(),
+                            };
+                            self.splits.push(split);
+                            splits::save_splits(&self.splits, self.account_name());
+                            let key = format!("#{}", name);
+                            self.split_queries.insert(key.clone(), query);
+                            self.known_folders.push(key.clone());
+                            self.known_folders.sort();
+                            self.refresh_split_caches().await;
+                            self.mode = InputMode::Normal;
+                            self.navigate_folder(&key).await?;
+                        } else {
+                            let sf = SmartFolder {
+                                name: name.clone(),
+                                query: query.clone(),
+                            };
+                            self.smart_folders.push(sf);
+                            smart_folders::save_smart_folders(&self.smart_folders, self.account_name());
+                            let key = format!("@{}", name);
+                            self.smart_folder_queries.insert(key.clone(), query);
+                            self.known_folders.push(key.clone());
+                            self.known_folders.sort();
+                            self.mode = InputMode::Normal;
+                            self.navigate_folder(&key).await?;
+                        }
+                        self.creating_split = false;
                     }
                 }
                 InputMode::MaildirCreate => {
@@ -1729,6 +1756,7 @@ impl App {
                     self.mode = InputMode::Normal;
                 }
                 InputMode::SmartFolderCreate => {
+                    self.creating_split = false;
                     self.mode = InputMode::FolderPicker;
                 }
                 InputMode::SmartFolderName => {
@@ -2099,6 +2127,7 @@ pub async fn run(mut app: App) -> Result<()> {
                     phase: app.smart_create_phase,
                     preview: &app.smart_create_preview,
                     count: app.smart_create_count,
+                    title: if app.creating_split { "New Split" } else { "New Smart Folder" },
                 };
                 frame.render_widget(popup, size);
             }
