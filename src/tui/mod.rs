@@ -306,6 +306,12 @@ impl App {
         debug_log!("load_folder: query={:?} folder={:?}", query, self.current_folder);
         self.current_query = query.clone();
         self.envelopes = self.mu.find(&query, &FindOpts::default()).await?;
+        // If viewing the inbox, exclude messages that belong to splits
+        if self.is_inbox_folder() && !self.split_excluded.is_empty() {
+            let before = self.envelopes.len();
+            self.envelopes.retain(|e| !self.split_excluded.contains(&e.docid));
+            debug_log!("load_folder: split exclusion removed {} envelopes", before - self.envelopes.len());
+        }
         debug_log!("load_folder: got {} envelopes", self.envelopes.len());
         self.selected = 0;
         self.scroll_offset = 0;
@@ -315,9 +321,55 @@ impl App {
         Ok(())
     }
 
+    /// Check if the current folder is the account's inbox.
+    fn is_inbox_folder(&self) -> bool {
+        let inbox = self.account()
+            .map(|a| a.folders.inbox.as_str())
+            .unwrap_or("/Inbox");
+        self.current_folder == inbox
+    }
+
+    /// Run each split query against the inbox and cache the resulting docids.
+    /// Builds the combined `split_excluded` set used to filter the inbox view.
+    async fn refresh_split_caches(&mut self) {
+        self.split_excluded.clear();
+        if self.splits.is_empty() {
+            return;
+        }
+        let inbox_folder = self.account()
+            .map(|a| a.folders.inbox.clone())
+            .unwrap_or_else(|| "/Inbox".to_string());
+        let opts = FindOpts {
+            max_num: 10000,
+            threads: false,
+            descending: false,
+            ..Default::default()
+        };
+        for split in &self.splits {
+            let query = format!("maildir:{} AND ({})", inbox_folder, split.query);
+            match self.mu.find(&query, &opts).await {
+                Ok(envelopes) => {
+                    debug_log!("split cache {:?}: {} docids", split.name, envelopes.len());
+                    for e in &envelopes {
+                        self.split_excluded.insert(e.docid);
+                    }
+                }
+                Err(e) => {
+                    debug_log!("split cache error for {:?}: {}", split.name, e);
+                }
+            }
+        }
+        debug_log!("split_excluded total: {} docids", self.split_excluded.len());
+    }
+
     fn build_query(&self) -> String {
         let mut query = if let Some(q) = self.smart_folder_queries.get(&self.current_folder) {
             q.clone()
+        } else if let Some(q) = self.split_queries.get(&self.current_folder) {
+            let inbox_folder = self.account()
+                .map(|a| a.folders.inbox.clone())
+                .unwrap_or_else(|| "/Inbox".to_string());
+            format!("maildir:{} AND ({})", inbox_folder, q)
         } else if self.current_folder.starts_with('/') {
             format!("maildir:{}", self.current_folder)
         } else {
@@ -738,6 +790,12 @@ impl App {
             .unwrap_or_else(|| "/Inbox".to_string());
         self.current_folder = inbox;
         self.load_folder().await?;
+
+        // Refresh split caches for the new account
+        self.refresh_split_caches().await;
+        if self.is_inbox_folder() && !self.split_excluded.is_empty() {
+            self.load_folder().await?;
+        }
 
         let name = self.account().map(|a| a.name.as_str()).unwrap_or("?");
         self.set_status(format!("Switched to {}", name));
@@ -1770,6 +1828,12 @@ fn gethostname() -> String {
 pub async fn run(mut app: App) -> Result<()> {
     app.load_folder().await?;
 
+    // Populate split caches and re-filter inbox if needed
+    app.refresh_split_caches().await;
+    if app.is_inbox_folder() && !app.split_excluded.is_empty() {
+        app.load_folder().await?;
+    }
+
     // Start IPC listener as a background task, sending commands through a channel
     // Create shell result channel — replace the dummy one from App::new
     let (shell_tx, mut shell_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2207,6 +2271,9 @@ pub async fn run(mut app: App) -> Result<()> {
                         // Index complete — reload folder
                         app.indexing = false;
                         debug_log!("reindex: complete, reloading folder");
+                        // Refresh split caches before reloading so inbox
+                        // exclusions are up to date.
+                        app.refresh_split_caches().await;
                         if let Err(e) = app.load_folder().await {
                             debug_log!("reindex: reload error: {}", e);
                         }
