@@ -144,6 +144,10 @@ pub struct App {
     pub conversations_mode: bool,
     pub conversations: Vec<Conversation>,
 
+    // List/preview split (percentage for list pane, 10..90)
+    pub list_pct: u16,
+    pub dragging_border: bool,
+
     // Help overlay
     pub help_scroll: u16,
 
@@ -289,6 +293,8 @@ impl App {
             palette_filter: String::new(),
             palette_selected: 0,
             palette_entries: PaletteEntry::all_actions(),
+            list_pct: 35,
+            dragging_border: false,
             help_scroll: 0,
             status_message: None,
             status_time: None,
@@ -1945,6 +1951,7 @@ pub async fn run(mut app: App) -> Result<()> {
 
     terminal::enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
+    io::stdout().execute(crossterm::event::EnableMouseCapture)?;
     let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -1958,7 +1965,7 @@ pub async fn run(mut app: App) -> Result<()> {
 
         let preview_width = {
             let size = terminal.size()?;
-            (size.width * 65 / 100).saturating_sub(4)
+            (size.width * (100 - app.list_pct) / 100).saturating_sub(4)
         };
 
         if app.mode == InputMode::ThreadView {
@@ -2016,7 +2023,7 @@ pub async fn run(mut app: App) -> Result<()> {
                 _ => {
                     let content = Layout::default()
                         .direction(Direction::Horizontal)
-                        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+                        .constraints([Constraint::Percentage(app.list_pct), Constraint::Percentage(100 - app.list_pct)])
                         .split(outer[1]);
 
                     if app.conversations_mode {
@@ -2159,6 +2166,7 @@ pub async fn run(mut app: App) -> Result<()> {
                         let tmp_path = std::env::temp_dir()
                             .join(format!("hutt-compose-{}.eml", std::process::id()));
                         if std::fs::write(&tmp_path, &content).is_ok() {
+                            io::stdout().execute(crossterm::event::DisableMouseCapture)?;
                             terminal::disable_raw_mode()?;
                             io::stdout().execute(LeaveAlternateScreen)?;
 
@@ -2200,6 +2208,7 @@ pub async fn run(mut app: App) -> Result<()> {
 
                             terminal::enable_raw_mode()?;
                             io::stdout().execute(EnterAlternateScreen)?;
+                            io::stdout().execute(crossterm::event::EnableMouseCapture)?;
                             terminal.clear()?;
 
                             match send_result {
@@ -2223,6 +2232,7 @@ pub async fn run(mut app: App) -> Result<()> {
 
         // Handle suspended shell command (like compose, needs terminal suspend/resume)
         if let Some(pending) = app.shell_pending.take() {
+            io::stdout().execute(crossterm::event::DisableMouseCapture)?;
             terminal::disable_raw_mode()?;
             io::stdout().execute(LeaveAlternateScreen)?;
 
@@ -2232,6 +2242,7 @@ pub async fn run(mut app: App) -> Result<()> {
 
             terminal::enable_raw_mode()?;
             io::stdout().execute(EnterAlternateScreen)?;
+            io::stdout().execute(crossterm::event::EnableMouseCapture)?;
             terminal.clear()?;
 
             match status {
@@ -2363,6 +2374,38 @@ pub async fn run(mut app: App) -> Result<()> {
             _ = tokio::time::sleep(timeout) => None,
         };
 
+        // Handle mouse events (border drag to resize list/preview split)
+        if let Some(Event::Mouse(mouse)) = event {
+            use crossterm::event::{MouseEventKind, MouseButton};
+            if app.mode == InputMode::Normal || app.mode == InputMode::Search {
+                let size = terminal.size()?;
+                let border_col = (size.width as u32 * app.list_pct as u32 / 100) as u16;
+                let in_content = mouse.row > 0 && mouse.row < size.height.saturating_sub(1);
+
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) if in_content => {
+                        // Start drag if clicking within 1 col of the border
+                        if mouse.column.abs_diff(border_col) <= 1 {
+                            app.dragging_border = true;
+                        }
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) if app.dragging_border => {
+                        let new_pct = ((mouse.column as u32) * 100 / (size.width as u32)) as u16;
+                        let clamped = new_pct.clamp(10, 90);
+                        if clamped != app.list_pct {
+                            app.list_pct = clamped;
+                            app.preview_cache = RenderCache::new();
+                        }
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        app.dragging_border = false;
+                    }
+                    _ => {}
+                }
+            }
+            continue;
+        }
+
         if let Some(Event::Key(key)) = event {
             if key.kind != KeyEventKind::Press {
                 continue;
@@ -2434,6 +2477,7 @@ pub async fn run(mut app: App) -> Result<()> {
         }
     }
 
+    io::stdout().execute(crossterm::event::DisableMouseCapture)?;
     terminal::disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
     app.mu.quit().await?;

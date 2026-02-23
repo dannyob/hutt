@@ -359,8 +359,16 @@ impl MuClient {
             return Ok(true);
         }
         if mu_sexp::plist_get(&value, "info").is_some() {
-            mu_log!("index: complete (:info)");
-            return Ok(true);
+            // mu 1.12 sends (:info index :status running ...) for progress
+            // and (:info index :status complete ...) when done.
+            let status = mu_sexp::plist_get(&value, "status")
+                .and_then(|v| v.as_symbol());
+            if status == Some("complete") {
+                mu_log!("index: complete (:info :status complete)");
+                return Ok(true);
+            }
+            mu_log!("index: progress (:info :status {:?})", status);
+            return Ok(false);
         }
         if mu_sexp::is_update(&value) {
             return Ok(false); // progress update
