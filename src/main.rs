@@ -8,6 +8,7 @@ mod mu_client;
 mod mu_sexp;
 mod send;
 mod smart_folders;
+mod splits;
 mod tui;
 mod undo;
 
