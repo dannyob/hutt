@@ -209,6 +209,7 @@ pub struct SmartFolderPopup<'a> {
     pub phase: u8,
     pub preview: &'a [String],
     pub count: Option<u32>,
+    pub title: &'a str,
 }
 
 impl<'a> Widget for SmartFolderPopup<'a> {
@@ -220,9 +221,9 @@ impl<'a> Widget for SmartFolderPopup<'a> {
         Clear.render(popup, buf);
 
         let title = if self.phase == 0 {
-            " New Smart Folder — Query "
+            format!(" {} — Query ", self.title)
         } else {
-            " New Smart Folder — Name "
+            format!(" {} — Name ", self.title)
         };
         let block = Block::default()
             .borders(Borders::ALL)
