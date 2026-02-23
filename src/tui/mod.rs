@@ -35,6 +35,7 @@ use crate::mime_render::{self, RenderCache};
 use crate::mu_client::{FindOpts, MuClient};
 use crate::send;
 use crate::smart_folders::{self, SmartFolder};
+use crate::splits::{self, Split};
 use crate::undo::{UndoAction, UndoEntry, UndoStack};
 
 use self::command_palette::{CommandPalette, PaletteEntry};
@@ -117,6 +118,12 @@ pub struct App {
     // Smart folders
     pub smart_folders: Vec<SmartFolder>,
     pub smart_folder_queries: HashMap<String, String>, // "@name" -> query
+
+    // Splits (inbox partitions)
+    pub splits: Vec<Split>,
+    pub split_queries: HashMap<String, String>,   // "#name" -> query
+    pub split_excluded: HashSet<u32>,              // union of all split caches
+    pub creating_split: bool,                      // true = create-flow saves as split
 
     // Smart folder creation
     pub smart_create_query: String,
@@ -227,6 +234,16 @@ impl App {
             known_folders.push(format!("@{}", sf.name));
         }
 
+        // Load splits from disk for the default account
+        let splits = splits::load_splits(acct_name);
+        let split_queries: HashMap<String, String> = splits
+            .iter()
+            .map(|s| (format!("#{}", s.name), s.query.clone()))
+            .collect();
+        for s in &splits {
+            known_folders.push(format!("#{}", s.name));
+        }
+
         Ok(Self {
             active_account,
             current_folder: "/Inbox".to_string(),
@@ -257,6 +274,10 @@ impl App {
             folder_selected: 0,
             smart_folders,
             smart_folder_queries,
+            splits,
+            split_queries,
+            split_excluded: HashSet::new(),
+            creating_split: false,
             smart_create_query: String::new(),
             smart_create_name: String::new(),
             smart_create_phase: 0,
@@ -698,6 +719,17 @@ impl App {
         ];
         for sf in &self.smart_folders {
             self.known_folders.push(format!("@{}", sf.name));
+        }
+
+        // Reload splits for new account
+        self.splits = splits::load_splits(&acct_name);
+        self.split_queries = self.splits
+            .iter()
+            .map(|s| (format!("#{}", s.name), s.query.clone()))
+            .collect();
+        self.split_excluded.clear();
+        for s in &self.splits {
+            self.known_folders.push(format!("#{}", s.name));
         }
 
         // Navigate to new account's inbox
