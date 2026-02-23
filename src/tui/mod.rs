@@ -1546,6 +1546,16 @@ impl App {
                 }
             }
 
+            Action::CreateSplit => {
+                self.smart_create_query.clear();
+                self.smart_create_name.clear();
+                self.smart_create_phase = 0;
+                self.smart_create_preview.clear();
+                self.smart_create_count = None;
+                self.creating_split = true;
+                self.mode = InputMode::SmartFolderCreate;
+            }
+
             // Text input
             Action::InputChar(c) => match self.mode {
                 InputMode::Search => self.search_input.push(c),
