@@ -1100,9 +1100,11 @@ impl App {
             if filter.is_empty() {
                 result.push(f.clone());
             } else {
-                // For smart folders (@Name), also match against just the name
+                // For smart folders (@Name) and splits (#Name), also match against just the name
                 let matches = f.to_lowercase().contains(&filter)
                     || f.strip_prefix('@')
+                        .is_some_and(|name| name.to_lowercase().contains(&filter))
+                    || f.strip_prefix('#')
                         .is_some_and(|name| name.to_lowercase().contains(&filter));
                 if matches {
                     result.push(f.clone());
