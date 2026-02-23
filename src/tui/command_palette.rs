@@ -283,6 +283,13 @@ impl PaletteEntry {
                 shortcut: Some("Ctrl+r".into()),
                 action: Action::SyncMail,
             },
+            // Splits
+            PaletteEntry {
+                name: "Create Split".into(),
+                description: "Create an inbox split (partitions inbox by query)".into(),
+                shortcut: None,
+                action: Action::CreateSplit,
+            },
             // Help
             PaletteEntry {
                 name: "Help".into(),

@@ -97,6 +97,9 @@ pub enum Action {
     // Sync (Phase 4)
     SyncMail,
 
+    // Splits
+    CreateSplit,
+
     // Custom bindings
     RunShell {
         command: String,
@@ -288,6 +291,7 @@ pub fn parse_action_name(name: &str) -> Result<Action, String> {
         "toggle_conversations" | "conversations" => Ok(Action::ToggleConversations),
         "show_help" | "help" => Ok(Action::ShowHelp),
         "sync_mail" | "sync" => Ok(Action::SyncMail),
+        "create_split" => Ok(Action::CreateSplit),
         "quit" => Ok(Action::Quit),
         _ => Err(format!("unknown action: {:?}", name)),
     }
@@ -792,6 +796,7 @@ mod tests {
             "move_to_folder",
             "move_down",
             "sync_mail",
+            "create_split",
             "quit",
             "open_thread",
             "compose",
