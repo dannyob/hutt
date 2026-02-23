@@ -1967,8 +1967,6 @@ pub async fn run(mut app: App) -> Result<()> {
             app.ensure_preview_loaded(preview_width);
         }
 
-        let mut hyperlink_regions: Vec<preview::HyperlinkRegion> = Vec::new();
-
         terminal.draw(|frame| {
             let size = frame.area();
             let outer = Layout::default()
@@ -2014,10 +2012,6 @@ pub async fn run(mut app: App) -> Result<()> {
                         scroll: app.thread_scroll,
                     };
                     frame.render_widget(tv, outer[1]);
-                    // Scan rendered buffer for URLs in thread body text
-                    hyperlink_regions.extend(
-                        preview::scan_buffer_urls(frame.buffer_mut(), outer[1]),
-                    );
                 }
                 _ => {
                     let content = Layout::default()
@@ -2070,17 +2064,6 @@ pub async fn run(mut app: App) -> Result<()> {
                         scroll: app.preview_scroll,
                     };
                     frame.render_widget(preview, content[1]);
-
-                    // Collect hyperlink regions for post-render
-                    if let Some(env) = envelope {
-                        hyperlink_regions = preview::preview_hyperlinks(
-                            env, content[1], app.preview_scroll,
-                        );
-                    }
-                    // Scan rendered buffer for URLs in the body
-                    hyperlink_regions.extend(
-                        preview::scan_buffer_urls(frame.buffer_mut(), content[1]),
-                    );
                 }
             }
 
@@ -2100,21 +2083,6 @@ pub async fn run(mut app: App) -> Result<()> {
                 conversations_mode: app.conversations_mode,
             };
             frame.render_widget(bottom, outer[2]);
-
-            // Popup overlays — suppress hyperlinks when popups cover the content
-            let has_popup = matches!(
-                app.mode,
-                InputMode::FolderPicker
-                    | InputMode::MoveToFolder
-                    | InputMode::CommandPalette
-                    | InputMode::Help
-                    | InputMode::SmartFolderCreate
-                    | InputMode::SmartFolderName
-                    | InputMode::MaildirCreate
-            );
-            if has_popup {
-                hyperlink_regions.clear();
-            }
 
             if app.mode == InputMode::FolderPicker {
                 let filtered = app.filtered_folders();
@@ -2169,14 +2137,6 @@ pub async fn run(mut app: App) -> Result<()> {
                 frame.render_widget(help, size);
             }
         })?;
-
-        // Write OSC 8 hyperlinks directly to terminal (after ratatui flush)
-        if !hyperlink_regions.is_empty() {
-            let _ = preview::write_hyperlinks(
-                &mut io::stdout(),
-                &hyperlink_regions,
-            );
-        }
 
         if app.should_quit {
             break;
