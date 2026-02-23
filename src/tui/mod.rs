@@ -688,6 +688,18 @@ impl App {
                     self.known_folders.push(key);
                     self.known_folders.sort();
                 }
+                UndoAction::DeleteSplit { split } => {
+                    self.splits.push(split.clone());
+                    splits::save_splits(&self.splits, self.account_name());
+                    let key = format!("#{}", split.name);
+                    self.split_queries.insert(key.clone(), split.query);
+                    self.known_folders.push(key);
+                    self.known_folders.sort();
+                    self.refresh_split_caches().await;
+                    if self.is_inbox_folder() {
+                        self.load_folder().await?;
+                    }
+                }
                 UndoAction::DeleteMaildirFolder { path } => {
                     // Re-create the maildir directory structure
                     if let Some(account) = self.account() {

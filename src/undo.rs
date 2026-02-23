@@ -2,6 +2,7 @@
 //! Each entry records the state before an action so it can be reversed.
 
 use crate::smart_folders::SmartFolder;
+use crate::splits::Split;
 
 pub enum UndoAction {
     MoveMessage {
@@ -11,6 +12,9 @@ pub enum UndoAction {
     },
     DeleteSmartFolder {
         folder: SmartFolder,
+    },
+    DeleteSplit {
+        split: Split,
     },
     DeleteMaildirFolder {
         path: String,
