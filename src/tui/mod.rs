@@ -916,6 +916,24 @@ impl App {
                     self.folder_selected = max - 1;
                 }
             }
+        } else if let Some(name) = folder.strip_prefix('#') {
+            // Split — remove from list and save
+            if let Some(pos) = self.splits.iter().position(|s| s.name == name) {
+                let removed = self.splits.remove(pos);
+                splits::save_splits(&self.splits, self.account_name());
+                self.split_queries.remove(&folder);
+                self.known_folders.retain(|f| f != &folder);
+                self.refresh_split_caches().await;
+                self.undo_stack.push(UndoEntry {
+                    action: UndoAction::DeleteSplit { split: removed },
+                    description: format!("Deleted split {}", name),
+                });
+                self.set_status(format!("Deleted split \"{}\" (z to undo)", name));
+                let max = self.filtered_folders().len();
+                if self.folder_selected >= max && max > 0 {
+                    self.folder_selected = max - 1;
+                }
+            }
         } else if folder.starts_with('/') {
             // Maildir — check if empty, then delete
             if let Some(account) = self.account() {
