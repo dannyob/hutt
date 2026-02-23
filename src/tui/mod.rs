@@ -1119,6 +1119,10 @@ impl App {
         self.known_folders
             .iter()
             .filter(|f| {
+                // Exclude splits from move targets
+                if f.starts_with('#') {
+                    return false;
+                }
                 if filter.is_empty() {
                     return true;
                 }
