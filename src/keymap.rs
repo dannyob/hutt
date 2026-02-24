@@ -98,8 +98,9 @@ pub enum Action {
     // Conversations
     ToggleConversations,
 
-    // Help
+    // Help / Headers
     ShowHelp,
+    ToggleHeaders,
 
     // Sync (Phase 4)
     SyncMail,
@@ -317,6 +318,7 @@ pub fn parse_action_name(name: &str) -> Result<Action, String> {
         "sync_mail" | "sync" => Ok(Action::SyncMail),
         "create_split" => Ok(Action::CreateSplit),
         "edit_folder" => Ok(Action::EditFolder),
+        "toggle_headers" => Ok(Action::ToggleHeaders),
         "delete_folder" => Ok(Action::DeleteFolder),
         "open_account_picker" | "account_picker" => Ok(Action::OpenAccountPicker),
         "quit" => Ok(Action::Quit),
@@ -423,6 +425,7 @@ fn action_to_name(action: &Action) -> Option<String> {
         Action::SyncMail => "sync_mail",
         Action::CreateSplit => "create_split",
         Action::EditFolder => "edit_folder",
+        Action::ToggleHeaders => "toggle_headers",
         Action::DeleteFolder => "delete_folder",
         Action::OpenAccountPicker => "account_picker",
         Action::Quit => "quit",
@@ -637,6 +640,7 @@ impl KeyMapper {
                 ("thread_toggle_expand", "o", "Toggle expand"),
                 ("thread_expand_all", "O", "Expand/collapse all"),
                 ("close_thread", "q / Esc", "Close thread"),
+                ("toggle_headers", "h", "Toggle all headers"),
             ]),
             ("Compose", &[
                 ("compose", "c", "Compose new"),
@@ -854,6 +858,9 @@ impl KeyMapper {
             (KeyCode::Char('S'), KeyModifiers::SHIFT) => Action::FilterStarred,
             (KeyCode::Char('R'), KeyModifiers::SHIFT) => Action::FilterNeedsReply,
 
+            // Headers
+            (KeyCode::Char('h'), KeyModifiers::NONE) => Action::ToggleHeaders,
+
             // Thread view
             (KeyCode::Enter, _) => Action::OpenThread,
 
@@ -984,6 +991,8 @@ impl KeyMapper {
             (KeyCode::Char('r'), KeyModifiers::NONE) => Action::Reply,
             (KeyCode::Char('a'), KeyModifiers::NONE) => Action::ReplyAll,
             (KeyCode::Char('f'), KeyModifiers::NONE) => Action::Forward,
+            // Headers
+            (KeyCode::Char('h'), KeyModifiers::NONE) => Action::ToggleHeaders,
             // Folder cycling
             (KeyCode::Tab, _) => Action::NextFolder,
             (KeyCode::BackTab, _) => Action::PrevFolder,

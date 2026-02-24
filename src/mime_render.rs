@@ -31,6 +31,26 @@ fn html_to_text(html: &[u8], width: usize) -> String {
 }
 
 /// Render a message file to plain text for the preview pane.
+/// Extract all raw headers from a message file (everything before the first blank line).
+pub fn extract_raw_headers(path: &Path) -> Result<Vec<(String, String)>> {
+    let raw = std::fs::read(path)
+        .with_context(|| format!("reading message file: {}", path.display()))?;
+
+    let message = mail_parser::MessageParser::default()
+        .parse(&raw)
+        .context("failed to parse MIME message")?;
+
+    let mut headers = Vec::new();
+    for header in message.headers() {
+        let name = header.name().to_string();
+        let value = header.value().as_text().unwrap_or("").to_string();
+        if !value.is_empty() {
+            headers.push((name, value));
+        }
+    }
+    Ok(headers)
+}
+
 pub fn render_message(path: &Path, width: u16) -> Result<String> {
     let raw = std::fs::read(path)
         .with_context(|| format!("reading message file: {}", path.display()))?;
