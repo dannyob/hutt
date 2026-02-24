@@ -13,7 +13,7 @@ pub struct Config {
     pub accounts: Vec<AccountConfig>,
     pub editor: String,
     pub sync_command: Option<String>,
-    pub snippets: Vec<Snippet>,
+
     #[serde(default)]
     pub bindings: BindingsSection,
     /// Start in conversations (grouped threads) mode.
@@ -40,7 +40,7 @@ impl Default for Config {
             accounts: Vec::new(),
             editor: "nvim".to_string(),
             sync_command: None,
-            snippets: Vec::new(),
+
             bindings: BindingsSection::default(),
             conversations: false,
             background_servers: true,
@@ -135,17 +135,6 @@ impl Default for FolderConfig {
             spam: "/Spam".to_string(),
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Snippets  (templates triggered by a prefix while composing)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)]
-pub struct Snippet {
-    pub trigger: String,
-    pub body: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -378,21 +367,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_snippets() {
-        let toml_str = r#"
-            [[snippets]]
-            trigger = "/sig"
-            body = "Best,\nUser"
-
-            [[snippets]]
-            trigger = "/ty"
-            body = "Thanks for your email."
-        "#;
-        let cfg: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.snippets.len(), 2);
-        assert_eq!(cfg.snippets[0].trigger, "/sig");
-    }
-
     #[test]
     fn parse_bindings_global() {
         let toml_str = r#"

@@ -1,7 +1,6 @@
 use anyhow::{bail, Context, Result};
 use lexpr::Value;
 use std::sync::OnceLock;
-use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
@@ -217,25 +216,6 @@ impl MuClient {
         }
     }
 
-    /// Like recv() but with a timeout.  Returns None on timeout.
-    #[allow(dead_code)]
-    async fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<Value>> {
-        loop {
-            match tokio::time::timeout(timeout, self.reader.next_frame()).await {
-                Ok(Ok(value)) => {
-                    if mu_sexp::is_erase(&value) {
-                        continue;
-                    }
-                    if let Some(err) = mu_sexp::is_error(&value) {
-                        bail!("mu server error: {}", err);
-                    }
-                    return Ok(Some(value));
-                }
-                Ok(Err(e)) => return Err(e),
-                Err(_) => return Ok(None), // timeout
-            }
-        }
-    }
 
     pub async fn ping(&mut self) -> Result<()> {
         self.send("(ping)").await?;

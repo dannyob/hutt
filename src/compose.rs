@@ -265,61 +265,6 @@ pub fn launch_editor(
     Ok(mtime_after != mtime_before)
 }
 
-/// Launch the editor in a split/new window if running inside kitty or tmux,
-/// otherwise fall back to a regular blocking editor launch.
-#[allow(dead_code)]
-pub fn launch_editor_split(
-    file_path: &Path,
-    editor: &str,
-    env_vars: &[(&str, &str)],
-) -> Result<()> {
-    let file_str = file_path
-        .to_str()
-        .context("file path is not valid UTF-8")?;
-
-    // Build env export prefix for shell commands (kitty/tmux launch via sh -c)
-    let env_prefix: String = env_vars
-        .iter()
-        .map(|(k, v)| format!("{}={} ", k, shell_escape(v)))
-        .collect();
-
-    // Try kitty first
-    if std::env::var("KITTY_PID").is_ok() {
-        let editor_cmd = format!("{}{} {}", env_prefix, editor, file_str);
-        let status = Command::new("kitten")
-            .args(["@", "launch", "--type=window", "--", "sh", "-c", &editor_cmd])
-            .status()
-            .context("failed to launch kitten @ launch")?;
-
-        if status.success() {
-            return Ok(());
-        }
-        // Fall through on failure
-    }
-
-    // Try tmux
-    if std::env::var("TMUX").is_ok() {
-        let editor_cmd = format!("{}{} {}", env_prefix, editor, file_str);
-        let status = Command::new("tmux")
-            .args(["split-window", "-h", "-l", "50%", &editor_cmd])
-            .status()
-            .context("failed to launch tmux split-window")?;
-
-        if status.success() {
-            return Ok(());
-        }
-        // Fall through on failure
-    }
-
-    // Fallback: blocking editor
-    launch_editor(file_path, editor, env_vars)?;
-    Ok(())
-}
-
-/// Minimal shell escaping: wrap in single quotes, escape internal single quotes.
-fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
 
 #[cfg(test)]
 mod tests {

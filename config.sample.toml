@@ -97,29 +97,6 @@ spam    = "/Junk"
 # spam    = "/Spam"
 
 # ---------------------------------------------------------------------------
-# Snippets
-# ---------------------------------------------------------------------------
-# Snippets are short text expansions triggered by a prefix while composing.
-# Type the trigger string and it will be replaced by the body text.
-
-[[snippets]]
-trigger = "/sig"
-body    = """\
-Best regards,
-Your Name
-"""
-
-[[snippets]]
-trigger = "/ty"
-body    = "Thanks for your email — I'll get back to you shortly."
-
-[[snippets]]
-trigger = "/addr"
-body    = """\
-123 Example Street
-Anytown, CA 90210
-"""
-
 # ---------------------------------------------------------------------------
 # Smart Folders (Virtual Folders)
 # ---------------------------------------------------------------------------
