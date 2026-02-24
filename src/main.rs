@@ -24,6 +24,7 @@ USAGE:
     hutt [OPTIONS] [FOLDER]          Launch the TUI
     hutt remote <COMMAND> [ARGS]     Send command to a running instance
     hutt r <COMMAND> [ARGS]          (shorthand for remote)
+    hutt config path                 Print config file path
 
 OPTIONS:
     -h, --help                  Show this help message
@@ -112,6 +113,31 @@ fn extract_account(args: &[String]) -> (Option<String>, Vec<String>) {
     (account, rest)
 }
 
+fn run_config(args: &[String]) -> Result<()> {
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("path");
+    match sub {
+        "path" => {
+            match config::Config::locate() {
+                Some(path) => println!("{}", path.display()),
+                None => {
+                    eprintln!("no config file found");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "-h" | "--help" | "help" => {
+            eprintln!(
+                "hutt config — config file utilities
+
+USAGE:
+    hutt config path            Print config file path"
+            );
+        }
+        other => bail!("unknown config command: '{}'\nRun 'hutt config --help' for usage", other),
+    }
+    Ok(())
+}
+
 async fn run_remote(args: &[String]) -> Result<()> {
     if args.is_empty() {
         print_remote_help();
@@ -198,6 +224,10 @@ async fn main() -> Result<()> {
             // Remote subcommand
             "remote" | "r" => {
                 return run_remote(&args[i + 1..]).await;
+            }
+            // Config subcommand
+            "config" => {
+                return run_config(&args[i + 1..]);
             }
             // Help/version
             "-h" | "--help" => {
