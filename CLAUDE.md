@@ -51,6 +51,12 @@ Each widget is a separate module: `envelope_list` (message list), `preview` (mes
 - **Split inbox** (`splits.rs`): Inbox partitioning by query. Splits are persisted per-account as `~/.config/hutt/splits.<account>.toml`. Split queries run eagerly at startup/reindex, caching matched docids in `HashSet<u32>`. Inbox view excludes matched messages. `#` prefix in folder names.
 - **Tab bar** (`tui/status_bar.rs` `TopBar`): Clickable folder tabs replacing the old top bar. Renders account badge, pinned inbox, scrollable tabs, overflow button. `TabRegion`/`TabRegionKind` structs enable mouse hit testing. Tab order configurable via `tabs` account config field with `/`, `#`, `@` wildcards.
 
+### Gmail archive handling
+Gmail IMAP uses labels, not folders. Messages in Inbox already exist in `[Gmail]/All Mail`. Archiving via `mu move` to All Mail creates duplicates that break mbsync (`duplicate UID` errors). Instead, `triage_move()` detects Gmail accounts (archive folder contains `[Gmail]`) and uses `MuClient::remove_msg()` to delete from Inbox. The message remains in All Mail because that's how Gmail works. Undo is not supported for Gmail archive (message is removed from mu's database).
+
+### hutt server (planned)
+Drop-in replacement for `mu server` that proxies commands through hutt's running mu server via bidirectional IPC. Falls back to standalone `mu server` when hutt isn't running or `--muhome` doesn't match any account. Design doc: `docs/plans/2026-02-23-hutt-server-design.md`. Implementation plan: `docs/plans/2026-02-23-hutt-server-plan.md`.
+
 ### Mouse support
 Crossterm mouse capture enabled during normal operation (disabled during compose/shell suspend). `MouseEventKind::Down` on row 0 checks `tab_regions` for tab/account/overflow clicks. Border drag (`dragging_border` + `list_pct`) resizes the list/preview split.
 
