@@ -27,7 +27,7 @@ function M.setup_buffer()
 
   -- Spell-checking is handy for prose.
   wo.spell = true
-  wo.spelllang = "en"
+  bo.spelllang = "en"
 
   -- Soft-wrap long lines in the display so nothing is hidden.
   wo.wrap = true
