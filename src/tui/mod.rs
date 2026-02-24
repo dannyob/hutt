@@ -1313,7 +1313,16 @@ impl App {
 
     async fn update_smart_create_preview(&mut self) {
         if smart_folders::should_search(&self.smart_create_query) {
-            match self.mu.find_preview(&self.smart_create_query, 5).await {
+            // For splits, wrap query with inbox constraint (same as build_query)
+            let preview_query = if self.creating_split {
+                let inbox = self.account()
+                    .map(|a| a.folders.inbox.clone())
+                    .unwrap_or_else(|| "/Inbox".to_string());
+                format!("maildir:{} AND ({})", inbox, self.smart_create_query)
+            } else {
+                self.smart_create_query.clone()
+            };
+            match self.mu.find_preview(&preview_query, 5).await {
                 Ok((envelopes, count)) => {
                     self.smart_create_count = Some(count);
                     self.smart_create_preview = envelopes
