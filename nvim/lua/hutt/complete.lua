@@ -2,12 +2,22 @@
 
 local M = {}
 
+--- Build the --muhome flag if HUTT_MUHOME is set.
+--- @return string
+local function muhome_flag()
+  local muhome = vim.env.HUTT_MUHOME
+  if muhome and muhome ~= "" then
+    return string.format("--muhome=%s ", vim.fn.shellescape(muhome))
+  end
+  return ""
+end
+
 --- Fallback: parse mu cfind --format=mutt-ab output.
 --- Lines are: address<TAB>name (first line is a header we skip).
 --- @param pattern string
 --- @return table[]
 local function mu_cfind_mutt_ab(pattern)
-  local cmd = string.format("mu cfind --format=mutt-ab %s 2>/dev/null", vim.fn.shellescape(pattern))
+  local cmd = string.format("mu cfind %s--format=mutt-ab %s 2>/dev/null", muhome_flag(), vim.fn.shellescape(pattern))
   local output = vim.fn.system(cmd)
 
   if vim.v.shell_error ~= 0 or output == "" then
@@ -53,7 +63,7 @@ local function mu_cfind(pattern)
   -- "name" and "address" keys (or just "address" when name is empty).
   -- Older mu versions may not support --format=json; we fall back to
   -- --format=mutt-ab which gives tab-separated "address<TAB>name" lines.
-  local cmd = string.format("mu cfind --format=json %s 2>/dev/null", vim.fn.shellescape(pattern))
+  local cmd = string.format("mu cfind %s--format=json %s 2>/dev/null", muhome_flag(), vim.fn.shellescape(pattern))
   local output = vim.fn.system(cmd)
 
   if vim.v.shell_error ~= 0 or output == "" then

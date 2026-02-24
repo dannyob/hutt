@@ -2645,6 +2645,16 @@ pub async fn run(mut app: App) -> Result<()> {
                         let tmp_path = std::env::temp_dir()
                             .join(format!("hutt-compose-{}.eml", std::process::id()));
                         if std::fs::write(&tmp_path, &content).is_ok() {
+                            // Set env vars so the editor plugin can find the right mu database.
+                            if let Some(muhome) = app.config.effective_muhome(app.active_account) {
+                                std::env::set_var("HUTT_MUHOME", &muhome);
+                            } else {
+                                std::env::remove_var("HUTT_MUHOME");
+                            }
+                            if let Some(acct) = app.account() {
+                                std::env::set_var("HUTT_ACCOUNT", &acct.name);
+                            }
+
                             io::stdout().execute(crossterm::event::DisableMouseCapture)?;
                             terminal::disable_raw_mode()?;
                             io::stdout().execute(LeaveAlternateScreen)?;
