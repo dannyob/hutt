@@ -7,114 +7,12 @@ use ratatui::{
 
 use super::folder_picker::centered_rect;
 
-struct HelpSection {
-    title: &'static str,
-    keys: &'static [(&'static str, &'static str)],
-}
-
-const SECTIONS: &[HelpSection] = &[
-    HelpSection {
-        title: "Navigation",
-        keys: &[
-            ("j / Down", "Move down"),
-            ("k / Up", "Move up"),
-            ("gg", "Jump to top"),
-            ("G", "Jump to bottom"),
-            ("Space", "Scroll preview down"),
-            ("Shift+Space", "Scroll preview up"),
-            ("Ctrl+d", "Half page down"),
-            ("Ctrl+u", "Half page up"),
-            ("Ctrl+f", "Full page down"),
-            ("Ctrl+b", "Full page up"),
-        ],
-    },
-    HelpSection {
-        title: "Triage",
-        keys: &[
-            ("e", "Archive"),
-            ("#", "Trash"),
-            ("!", "Spam"),
-            ("u", "Toggle read/unread"),
-            ("s", "Toggle star"),
-            ("z", "Undo"),
-        ],
-    },
-    HelpSection {
-        title: "Folders",
-        keys: &[
-            ("gi", "Go to Inbox"),
-            ("ga", "Go to Archive"),
-            ("gd", "Go to Drafts"),
-            ("gt", "Go to Sent"),
-            ("g#", "Go to Trash"),
-            ("g!", "Go to Spam"),
-            ("gl", "Folder picker"),
-        ],
-    },
-    HelpSection {
-        title: "Search & Filters",
-        keys: &[
-            ("/", "Search"),
-            ("U", "Filter unread"),
-            ("S", "Filter starred"),
-            ("R", "Filter needs reply"),
-        ],
-    },
-    HelpSection {
-        title: "Selection",
-        keys: &[
-            ("x", "Toggle select"),
-            ("J", "Select + move down"),
-            ("K", "Select + move up"),
-        ],
-    },
-    HelpSection {
-        title: "Thread",
-        keys: &[
-            ("Enter", "Open thread"),
-            ("V", "Toggle conversations"),
-            ("o", "Toggle expand"),
-            ("O", "Expand/collapse all"),
-            ("q / Esc", "Close thread"),
-        ],
-    },
-    HelpSection {
-        title: "Compose",
-        keys: &[
-            ("c", "Compose new"),
-            ("r", "Reply"),
-            ("a", "Reply all"),
-            ("f", "Forward"),
-        ],
-    },
-    HelpSection {
-        title: "Links & Clipboard",
-        keys: &[
-            ("y", "Copy message URL"),
-            ("Y", "Copy thread URL"),
-            ("Ctrl+o", "Open in browser"),
-        ],
-    },
-    HelpSection {
-        title: "Accounts",
-        keys: &[
-            ("g Tab", "Next account"),
-            ("g Shift+Tab", "Previous account"),
-        ],
-    },
-    HelpSection {
-        title: "Other",
-        keys: &[
-            ("Ctrl+k", "Command palette"),
-            ("Ctrl+r", "Sync mail"),
-            ("?", "This help"),
-            ("q", "Quit"),
-        ],
-    },
-];
-
 pub struct HelpOverlay {
     pub scroll: u16,
+    /// (section_title, [(key_string, description)])
+    pub sections: Vec<(&'static str, Vec<(String, &'static str)>)>,
+    /// Custom bindings not in standard sections: (key_string, description)
+    pub extras: Vec<(String, String)>,
 }
 
 impl Widget for HelpOverlay {
@@ -147,22 +45,31 @@ impl Widget for HelpOverlay {
             return;
         }
 
-        // Build all lines first, then apply scroll
+        // Build all lines: (style, text)
         let mut lines: Vec<(Style, String)> = Vec::new();
-        let key_col_width = 14;
+        let key_col_width = 16;
 
-        for (si, section) in SECTIONS.iter().enumerate() {
+        let header_style = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+
+        for (si, (title, items)) in self.sections.iter().enumerate() {
             if si > 0 {
                 lines.push((Style::default(), String::new()));
             }
-            lines.push((
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-                format!(" {}", section.title),
-            ));
+            lines.push((header_style, format!(" {}", title)));
 
-            for (key, desc) in section.keys {
+            for (key, desc) in items {
+                let padded_key = format!("  {:width$}", key, width = key_col_width);
+                lines.push((Style::default(), format!("{}{}", padded_key, desc)));
+            }
+        }
+
+        // Custom bindings section
+        if !self.extras.is_empty() {
+            lines.push((Style::default(), String::new()));
+            lines.push((header_style, " Custom Bindings".to_string()));
+            for (key, desc) in &self.extras {
                 let padded_key = format!("  {:width$}", key, width = key_col_width);
                 lines.push((Style::default(), format!("{}{}", padded_key, desc)));
             }
@@ -190,7 +97,7 @@ impl Widget for HelpOverlay {
 
             if style.fg == Some(Color::Yellow) || style.fg == Some(Color::DarkGray) || line.is_empty()
             {
-                // Section header, footer, or blank line — render as-is
+                // Section header, footer, or blank line
                 buf.set_string(inner.x, y, line, *style);
             } else {
                 // Key-description line: color the key part in cyan

@@ -354,6 +354,124 @@ fn resolve_binding_value(value: &BindingValue) -> Result<BindAction, String> {
     }
 }
 
+/// Reverse-map an Action to its canonical config name (for help display).
+fn action_to_name(action: &Action) -> Option<String> {
+    let name = match action {
+        Action::MoveDown => "move_down",
+        Action::MoveUp => "move_up",
+        Action::JumpTop => "jump_top",
+        Action::JumpBottom => "jump_bottom",
+        Action::ScrollPreviewDown => "scroll_preview_down",
+        Action::ScrollPreviewUp => "scroll_preview_up",
+        Action::HalfPageDown => "half_page_down",
+        Action::HalfPageUp => "half_page_up",
+        Action::FullPageDown => "full_page_down",
+        Action::FullPageUp => "full_page_up",
+        Action::MoveToFolder(Some(f)) => match f.as_str() {
+            "archive" => "archive",
+            "trash" => "trash",
+            "spam" => "spam",
+            _ => return None,
+        },
+        Action::MoveToFolder(None) => "move_to_folder",
+        Action::ToggleRead => "toggle_read",
+        Action::ToggleStar => "toggle_star",
+        Action::Undo => "undo",
+        Action::GoInbox => "go_inbox",
+        Action::GoArchive => "go_archive",
+        Action::GoDrafts => "go_drafts",
+        Action::GoSent => "go_sent",
+        Action::GoTrash => "go_trash",
+        Action::GoSpam => "go_spam",
+        Action::GoStarred => "go_starred",
+        Action::GoAllMail => "go_all_mail",
+        Action::GoFolderPicker => "go_folder_picker",
+        Action::NextFolder => "next_folder",
+        Action::PrevFolder => "prev_folder",
+        Action::NextAccount => "next_account",
+        Action::PrevAccount => "prev_account",
+        Action::EnterSearch => "search",
+        Action::FilterUnread => "filter_unread",
+        Action::FilterStarred => "filter_starred",
+        Action::FilterNeedsReply => "filter_needs_reply",
+        Action::ToggleSelect => "toggle_select",
+        Action::SelectAll => "select_all",
+        Action::SelectFromHere => "select_from_here",
+        Action::ClearSelection => "clear_selection",
+        Action::SelectDown => "select_down",
+        Action::SelectUp => "select_up",
+        Action::OpenThread => "open_thread",
+        Action::CloseThread => "close_thread",
+        Action::ThreadNext => "thread_next",
+        Action::ThreadPrev => "thread_prev",
+        Action::ThreadToggleExpand => "thread_toggle_expand",
+        Action::ThreadExpandAll => "thread_expand_all",
+        Action::Compose => "compose",
+        Action::Reply => "reply",
+        Action::ReplyAll => "reply_all",
+        Action::Forward => "forward",
+        Action::CopyMessageUrl => "copy_message_url",
+        Action::CopyThreadUrl => "copy_thread_url",
+        Action::OpenInBrowser => "open_in_browser",
+        Action::OpenCommandPalette => "command_palette",
+        Action::ToggleConversations => "conversations",
+        Action::ShowHelp => "help",
+        Action::SyncMail => "sync_mail",
+        Action::CreateSplit => "create_split",
+        Action::OpenAccountPicker => "account_picker",
+        Action::Quit => "quit",
+        Action::Redraw => "redraw",
+        _ => return None,
+    };
+    Some(name.to_string())
+}
+
+/// Format a KeyCombo to a human-readable string.
+fn format_combo(combo: &KeyCombo) -> String {
+    let mut s = String::new();
+    if combo.modifiers.contains(KeyModifiers::CONTROL) {
+        s.push_str("Ctrl+");
+    }
+    if combo.modifiers.contains(KeyModifiers::SUPER) {
+        s.push_str("Cmd+");
+    }
+    // Don't show Shift for uppercase letters (it's implied)
+    let show_shift = combo.modifiers.contains(KeyModifiers::SHIFT)
+        && !matches!(combo.code, KeyCode::Char(c) if c.is_ascii_uppercase());
+    if show_shift {
+        s.push_str("Shift+");
+    }
+    match combo.code {
+        KeyCode::Char(' ') => s.push_str("Space"),
+        KeyCode::Char(c) => s.push(c),
+        KeyCode::Enter => s.push_str("Enter"),
+        KeyCode::Esc => s.push_str("Esc"),
+        KeyCode::Tab => s.push_str("Tab"),
+        KeyCode::BackTab => s.push_str("Shift+Tab"),
+        KeyCode::Up => s.push_str("Up"),
+        KeyCode::Down => s.push_str("Down"),
+        KeyCode::Left => s.push_str("Left"),
+        KeyCode::Right => s.push_str("Right"),
+        KeyCode::F(n) => { s.push_str(&format!("F{}", n)); }
+        KeyCode::Backspace => s.push_str("Backspace"),
+        KeyCode::Delete => s.push_str("Delete"),
+        KeyCode::Home => s.push_str("Home"),
+        KeyCode::End => s.push_str("End"),
+        KeyCode::PageUp => s.push_str("PageUp"),
+        KeyCode::PageDown => s.push_str("PageDown"),
+        _ => s.push('?'),
+    }
+    s
+}
+
+/// Format a KeyTrigger to a human-readable string.
+pub fn format_trigger(trigger: &KeyTrigger) -> String {
+    match trigger {
+        KeyTrigger::Single(combo) => format_combo(combo),
+        KeyTrigger::Sequence(a, b) => format!("{} {}", format_combo(a), format_combo(b)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // KeyMapper
 // ---------------------------------------------------------------------------
@@ -453,6 +571,140 @@ impl KeyMapper {
             }
         }
         None
+    }
+
+    /// Return effective help data: sections of (key_string, description) pairs,
+    /// plus any custom bindings not covered by the standard help sections.
+    #[allow(clippy::type_complexity)]
+    pub fn help_sections(&self) -> (Vec<(&'static str, Vec<(String, &'static str)>)>, Vec<(String, String)>) {
+        // Each entry: (action_pattern, default_key, description)
+        // action_pattern is matched against custom bindings to find overrides.
+        #[allow(clippy::type_complexity)]
+        let sections: &[(&str, &[(&str, &str, &str)])] = &[
+            ("Navigation", &[
+                ("move_down", "j / Down", "Move down"),
+                ("move_up", "k / Up", "Move up"),
+                ("jump_top", "gg", "Jump to top"),
+                ("jump_bottom", "G", "Jump to bottom"),
+                ("scroll_preview_down", "Space", "Scroll preview down"),
+                ("scroll_preview_up", "Shift+Space", "Scroll preview up"),
+                ("half_page_down", "Ctrl+d", "Half page down"),
+                ("half_page_up", "Ctrl+u", "Half page up"),
+            ]),
+            ("Triage", &[
+                ("archive", "e", "Archive"),
+                ("trash", "#", "Trash"),
+                ("spam", "!", "Spam"),
+                ("toggle_read", "u", "Toggle read/unread"),
+                ("toggle_star", "s", "Toggle star"),
+                ("undo", "z", "Undo"),
+            ]),
+            ("Folders", &[
+                ("go_inbox", "gi", "Go to Inbox"),
+                ("go_archive", "ga", "Go to Archive"),
+                ("go_drafts", "gd", "Go to Drafts"),
+                ("go_sent", "gt", "Go to Sent"),
+                ("go_starred", "gs", "Go to Starred"),
+                ("go_all_mail", "g*", "Go to All Mail"),
+                ("go_trash", "g#", "Go to Trash"),
+                ("go_spam", "g!", "Go to Spam"),
+                ("go_folder_picker", "gl", "Folder picker"),
+            ]),
+            ("Search & Filters", &[
+                ("search", "/", "Search"),
+                ("filter_unread", "U", "Filter unread"),
+                ("filter_starred", "S", "Filter starred"),
+                ("filter_needs_reply", "R", "Filter needs reply"),
+            ]),
+            ("Selection", &[
+                ("toggle_select", "x", "Toggle select"),
+                ("select_all", "Ctrl+a", "Select all"),
+                ("clear_selection", "Esc", "Clear selection"),
+                ("select_down", "J", "Select + move down"),
+                ("select_up", "K", "Select + move up"),
+            ]),
+            ("Thread", &[
+                ("open_thread", "Enter", "Open thread"),
+                ("conversations", "V", "Toggle conversations"),
+                ("thread_toggle_expand", "o", "Toggle expand"),
+                ("thread_expand_all", "O", "Expand/collapse all"),
+                ("close_thread", "q / Esc", "Close thread"),
+            ]),
+            ("Compose", &[
+                ("compose", "c", "Compose new"),
+                ("reply", "r", "Reply"),
+                ("reply_all", "a", "Reply all"),
+                ("forward", "f", "Forward"),
+            ]),
+            ("Links & Clipboard", &[
+                ("copy_message_url", "y", "Copy message URL"),
+                ("copy_thread_url", "Y", "Copy thread URL"),
+                ("open_in_browser", "Ctrl+o", "Open in browser"),
+            ]),
+            ("Other", &[
+                ("command_palette", "Ctrl+k", "Command palette"),
+                ("sync_mail", "Ctrl+r", "Sync mail"),
+                ("help", "?", "This help"),
+                ("quit", "q", "Quit"),
+            ]),
+        ];
+
+        // Build a lookup: action_name → custom key string
+        let mut custom_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut used_custom: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+        for (i, binding) in self.custom_bindings.iter().enumerate() {
+            let action_name = match &binding.action {
+                BindAction::Builtin(a) => action_to_name(a),
+                BindAction::Shell { .. } => None,
+                BindAction::Folder(_) => None,
+            };
+            if let Some(name) = action_name {
+                let key_str = format_trigger(&binding.trigger);
+                custom_map.entry(name).or_insert_with(|| {
+                    used_custom.insert(i);
+                    key_str
+                });
+            }
+        }
+
+        // Build output sections, replacing defaults with custom bindings where found
+        let mut result: Vec<(&'static str, Vec<(String, &'static str)>)> = Vec::new();
+        for (title, entries) in sections {
+            let mut items = Vec::new();
+            for (action_name, default_key, desc) in *entries {
+                let key = custom_map.get(*action_name)
+                    .cloned()
+                    .unwrap_or_else(|| (*default_key).to_string());
+                if let Some(name) = custom_map.get(*action_name) {
+                    // Mark as used if it matches
+                    for (i, binding) in self.custom_bindings.iter().enumerate() {
+                        if format_trigger(&binding.trigger) == *name {
+                            used_custom.insert(i);
+                        }
+                    }
+                }
+                items.push((key, *desc));
+            }
+            result.push((title, items));
+        }
+
+        // Collect custom bindings not shown in standard sections
+        let mut extras: Vec<(String, String)> = Vec::new();
+        for (i, binding) in self.custom_bindings.iter().enumerate() {
+            if used_custom.contains(&i) {
+                continue;
+            }
+            let key_str = format_trigger(&binding.trigger);
+            let desc = match &binding.action {
+                BindAction::Builtin(a) => format!("{:?}", a),
+                BindAction::Shell { command, .. } => format!("shell: {}", command),
+                BindAction::Folder(path) => format!("go to {}", path),
+            };
+            extras.push((key_str, desc));
+        }
+
+        (result, extras)
     }
 
     /// Normalize key events for consistent matching.
