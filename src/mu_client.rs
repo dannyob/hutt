@@ -329,6 +329,20 @@ impl MuClient {
         Ok(docid)
     }
 
+    /// Remove a message from the filesystem and database.
+    /// Used for Gmail archiving: deleting from Inbox effectively archives
+    /// the message (it remains in [Gmail]/All Mail).
+    pub async fn remove_msg(&mut self, docid: u32) -> Result<()> {
+        let cmd = format!("(remove :docid {})", docid);
+        self.send(&cmd).await?;
+        let resp = self.recv().await?;
+        // Response is (:remove <docid>)
+        if mu_sexp::plist_get_u32(&resp, "remove").is_none() {
+            mu_log!("remove_msg: unexpected response: {:?}", resp);
+        }
+        Ok(())
+    }
+
     /// Send the `(index)` command to mu server without waiting for the
     /// response.  Call `poll_index_frame()` to read responses one at a
     /// time from the event loop.

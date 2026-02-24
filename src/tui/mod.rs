@@ -1017,22 +1017,44 @@ impl App {
         (path, desc)
     }
 
+    /// Check if the current account is Gmail-style (archive = [Gmail]/All Mail).
+    /// For Gmail IMAP, messages in Inbox already exist in All Mail, so
+    /// "archiving" means removing from Inbox (not copying to All Mail).
+    fn is_gmail_archive(&self, dest_maildir: &str) -> bool {
+        let archive = self.account()
+            .map(|a| a.folders.archive.as_str())
+            .unwrap_or("/Archive");
+        // Gmail-style archive: destination is the All Mail folder,
+        // and source messages are in the Inbox
+        dest_maildir == archive
+            && archive.contains("[Gmail]")
+            && self.is_inbox_folder()
+    }
+
     async fn triage_move(&mut self, dest_maildir: &str, desc: &str) -> Result<()> {
         let targets = self.triage_targets();
         if targets.is_empty() {
             return Ok(());
         }
         let count = targets.len();
+        let gmail_archive = self.is_gmail_archive(dest_maildir);
         for (docid, maildir, flags) in &targets {
-            let new_docid = self.mu.move_msg(*docid, Some(dest_maildir), None).await?;
-            self.undo_stack.push(UndoEntry {
-                action: UndoAction::MoveMessage {
-                    docid: new_docid,
-                    original_maildir: maildir.clone(),
-                    original_flags: flags.clone(),
-                },
-                description: desc.to_string(),
-            });
+            if gmail_archive {
+                // Gmail: just remove from Inbox; message stays in All Mail.
+                // Undo not supported for Gmail archive (message removed from
+                // mu database; would need to re-sync to recover).
+                self.mu.remove_msg(*docid).await?;
+            } else {
+                let new_docid = self.mu.move_msg(*docid, Some(dest_maildir), None).await?;
+                self.undo_stack.push(UndoEntry {
+                    action: UndoAction::MoveMessage {
+                        docid: new_docid,
+                        original_maildir: maildir.clone(),
+                        original_flags: flags.clone(),
+                    },
+                    description: desc.to_string(),
+                });
+            }
         }
         let removed: HashSet<u32> = targets.iter().map(|(d, _, _)| *d).collect();
         self.envelopes.retain(|e| !removed.contains(&e.docid));
