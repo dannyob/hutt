@@ -93,7 +93,7 @@ impl<'a> Widget for EnvelopeList<'a> {
             buf.set_string(area.x, y, indicator, ind_style);
 
             // From field (up to 20 chars)
-            let from = envelope.from_display();
+            let from = envelope.sender_display();
             let from_width = 20.min(w.saturating_sub(2));
             let from_truncated = truncate_str(&from, from_width);
             let from_style = if is_unread {
