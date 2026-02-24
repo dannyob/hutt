@@ -69,6 +69,76 @@ fn debug_log_path() -> Option<&'static str> {
         .as_deref()
 }
 
+// ── Tab bar types ───────────────────────────────────────────────────
+
+pub struct TabRegion {
+    pub x_start: u16,
+    pub x_end: u16,
+    pub kind: TabRegionKind,
+}
+
+pub enum TabRegionKind {
+    Account,
+    Tab(usize),   // index into app.tabs
+    Overflow,     // the "…" button
+}
+
+/// Resolve the tab list from config + runtime folder data.
+///
+/// `config_tabs` is the user's `tabs` list (or None for default).
+/// Wildcards: `"/"` = remaining maildir folders, `"#"` = remaining splits,
+/// `"@"` = remaining smart folders.
+fn resolve_tabs(
+    config_tabs: Option<&[String]>,
+    account_folders: &[String],  // named folders: inbox, archive, drafts, sent, trash, spam
+    splits: &[String],           // "#name" entries
+    smart_folders: &[String],    // "@name" entries
+) -> Vec<String> {
+    let default_tabs: Vec<String> = vec![
+        account_folders.first().cloned().unwrap_or_else(|| "/Inbox".to_string()),
+        "#".to_string(),
+        "/".to_string(),
+        "@".to_string(),
+    ];
+    let config = config_tabs.unwrap_or(&default_tabs);
+
+    let mut result: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for entry in config {
+        match entry.as_str() {
+            "#" => {
+                for s in splits {
+                    if seen.insert(s.clone()) {
+                        result.push(s.clone());
+                    }
+                }
+            }
+            "@" => {
+                for s in smart_folders {
+                    if seen.insert(s.clone()) {
+                        result.push(s.clone());
+                    }
+                }
+            }
+            "/" => {
+                for f in account_folders {
+                    if seen.insert(f.clone()) {
+                        result.push(f.clone());
+                    }
+                }
+            }
+            _ => {
+                if seen.insert(entry.clone()) {
+                    result.push(entry.clone());
+                }
+            }
+        }
+    }
+
+    result
+}
+
 pub struct App {
     // Active account (index into config.accounts)
     pub active_account: usize,
@@ -144,6 +214,12 @@ pub struct App {
     pub conversations_mode: bool,
     pub conversations: Vec<Conversation>,
 
+    // Tab bar
+    pub tabs: Vec<String>,
+    pub tab_scroll: usize,
+    pub tab_regions: Vec<TabRegion>,
+    pub account_picker_selected: usize,
+
     // List/preview split (percentage for list pane, 10..90)
     pub list_pct: u16,
     pub dragging_border: bool,
@@ -205,6 +281,52 @@ impl App {
         self.account().map(|a| a.name.as_str()).unwrap_or("")
     }
 
+    /// Adjust tab_scroll to keep the selected folder visible in the tab bar.
+    fn adjust_tab_scroll(&mut self) {
+        if let Some(idx) = self.tabs.iter().position(|t| t == &self.current_folder) {
+            if idx == 0 {
+                // Inbox is pinned, no scroll needed
+                return;
+            }
+            // Ensure selected tab is within visible window.
+            // tab_scroll is the first non-Inbox tab index shown.
+            // Keep at least 1 neighbor before the selected tab.
+            let min_scroll = if idx > 1 { idx - 1 } else { 1 };
+            if self.tab_scroll > min_scroll {
+                self.tab_scroll = min_scroll;
+            }
+            // We can't know exactly how many tabs fit without terminal width,
+            // but we can ensure the selected tab isn't before the scroll window.
+            if idx < self.tab_scroll {
+                self.tab_scroll = if idx > 1 { idx - 1 } else { 1 };
+            }
+        }
+    }
+
+    /// Rebuild the tab list from current account config + runtime folder data.
+    fn rebuild_tabs(&mut self) {
+        let account = self.account();
+        let account_folder_list: Vec<String> = account
+            .map(|a| vec![
+                a.folders.inbox.clone(),
+                a.folders.archive.clone(),
+                a.folders.drafts.clone(),
+                a.folders.sent.clone(),
+                a.folders.trash.clone(),
+                a.folders.spam.clone(),
+            ])
+            .unwrap_or_default();
+        let split_names: Vec<String> = self.splits.iter().map(|s| format!("#{}", s.name)).collect();
+        let smart_folder_names: Vec<String> = self.smart_folders.iter().map(|sf| format!("@{}", sf.name)).collect();
+        self.tabs = resolve_tabs(
+            account.and_then(|a| a.tabs.as_deref()),
+            &account_folder_list,
+            &split_names,
+            &smart_folder_names,
+        );
+        self.tab_scroll = 0;
+    }
+
     pub async fn new(mu: MuClient, config: Config) -> Result<Self> {
         debug_log!("App::new: accounts={} editor={:?} bindings_global={} bindings_normal={} bindings_thread={}",
             config.accounts.len(), config.editor,
@@ -247,6 +369,27 @@ impl App {
         for s in &splits {
             known_folders.push(format!("#{}", s.name));
         }
+
+        // Resolve tab bar
+        let account = config.accounts.get(active_account);
+        let account_folder_list: Vec<String> = account
+            .map(|a| vec![
+                a.folders.inbox.clone(),
+                a.folders.archive.clone(),
+                a.folders.drafts.clone(),
+                a.folders.sent.clone(),
+                a.folders.trash.clone(),
+                a.folders.spam.clone(),
+            ])
+            .unwrap_or_default();
+        let split_names: Vec<String> = splits.iter().map(|s| format!("#{}", s.name)).collect();
+        let smart_folder_names: Vec<String> = smart_folders.iter().map(|sf| format!("@{}", sf.name)).collect();
+        let tabs = resolve_tabs(
+            account.and_then(|a| a.tabs.as_deref()),
+            &account_folder_list,
+            &split_names,
+            &smart_folder_names,
+        );
 
         Ok(Self {
             active_account,
@@ -293,6 +436,10 @@ impl App {
             palette_filter: String::new(),
             palette_selected: 0,
             palette_entries: PaletteEntry::all_actions(),
+            tabs,
+            tab_scroll: 0,
+            tab_regions: Vec::new(),
+            account_picker_selected: 0,
             list_pct: 35,
             dragging_border: false,
             help_scroll: 0,
@@ -693,6 +840,7 @@ impl App {
                         .insert(key.clone(), folder.query);
                     self.known_folders.push(key);
                     self.known_folders.sort();
+                    self.rebuild_tabs();
                 }
                 UndoAction::DeleteSplit { split } => {
                     self.splits.push(split.clone());
@@ -701,6 +849,7 @@ impl App {
                     self.split_queries.insert(key.clone(), split.query);
                     self.known_folders.push(key);
                     self.known_folders.sort();
+                    self.rebuild_tabs();
                     self.refresh_split_caches().await;
                     if self.is_inbox_folder() {
                         self.load_folder().await?;
@@ -802,6 +951,9 @@ impl App {
             self.known_folders.push(format!("#{}", s.name));
         }
 
+        // Rebuild tabs for new account
+        self.rebuild_tabs();
+
         // Navigate to new account's inbox
         let inbox = self.account()
             .map(|a| a.folders.inbox.clone())
@@ -828,6 +980,7 @@ impl App {
         self.filter_unread = false;
         self.filter_starred = false;
         self.filter_needs_reply = false;
+        self.adjust_tab_scroll();
         self.load_folder().await?;
         self.set_status(format!("Switched to {}", folder));
         Ok(())
@@ -836,17 +989,17 @@ impl App {
     /// Return the folder `delta` positions from the current one in the
     /// sorted known_folders list, wrapping around.
     fn next_folder(&self, delta: i32) -> Option<String> {
-        if self.known_folders.is_empty() {
+        let list = if self.tabs.is_empty() { &self.known_folders } else { &self.tabs };
+        if list.is_empty() {
             return None;
         }
-        let cur = self
-            .known_folders
+        let cur = list
             .iter()
             .position(|f| f == &self.current_folder)
             .unwrap_or(0);
-        let len = self.known_folders.len() as i32;
+        let len = list.len() as i32;
         let next = ((cur as i32 + delta) % len + len) % len;
-        Some(self.known_folders[next as usize].clone())
+        Some(list[next as usize].clone())
     }
 
     // ── Search ──────────────────────────────────────────────────────
@@ -911,6 +1064,7 @@ impl App {
                 smart_folders::save_smart_folders(&self.smart_folders, self.account_name());
                 self.smart_folder_queries.remove(&folder);
                 self.known_folders.retain(|f| f != &folder);
+                self.rebuild_tabs();
                 self.undo_stack.push(UndoEntry {
                     action: UndoAction::DeleteSmartFolder { folder: removed },
                     description: format!("Deleted smart folder {}", name),
@@ -929,6 +1083,7 @@ impl App {
                 splits::save_splits(&self.splits, self.account_name());
                 self.split_queries.remove(&folder);
                 self.known_folders.retain(|f| f != &folder);
+                self.rebuild_tabs();
                 self.refresh_split_caches().await;
                 self.undo_stack.push(UndoEntry {
                     action: UndoAction::DeleteSplit { split: removed },
@@ -1554,6 +1709,13 @@ impl App {
                 }
             }
 
+            Action::OpenAccountPicker => {
+                if self.config.accounts.len() > 1 {
+                    self.account_picker_selected = self.active_account;
+                    self.mode = InputMode::AccountPicker;
+                }
+            }
+
             Action::CreateSplit => {
                 self.smart_create_query.clear();
                 self.smart_create_name.clear();
@@ -1704,6 +1866,7 @@ impl App {
                             self.split_queries.insert(key.clone(), query);
                             self.known_folders.push(key.clone());
                             self.known_folders.sort();
+                            self.rebuild_tabs();
                             self.refresh_split_caches().await;
                             self.mode = InputMode::Normal;
                             self.navigate_folder(&key).await?;
@@ -1718,6 +1881,7 @@ impl App {
                             self.smart_folder_queries.insert(key.clone(), query);
                             self.known_folders.push(key.clone());
                             self.known_folders.sort();
+                            self.rebuild_tabs();
                             self.mode = InputMode::Normal;
                             self.navigate_folder(&key).await?;
                         }
@@ -2007,8 +2171,12 @@ pub async fn run(mut app: App) -> Result<()> {
                 thread_subject,
                 account_name,
                 conversations_mode: app.conversations_mode,
+                tabs: &app.tabs,
+                tab_scroll: app.tab_scroll,
+                multi_account: app.config.accounts.len() > 1,
             };
-            frame.render_widget(top, outer[0]);
+            let tab_bar_result = top.render_with_regions(outer[0], frame.buffer_mut());
+            app.tab_regions = tab_bar_result.regions;
 
             // Content
             match app.mode {
@@ -2142,6 +2310,49 @@ pub async fn run(mut app: App) -> Result<()> {
                     scroll: app.help_scroll,
                 };
                 frame.render_widget(help, size);
+            }
+
+            // Account picker dropdown
+            if app.mode == InputMode::AccountPicker {
+                use ratatui::style::{Color as C, Modifier as M, Style as S};
+                use ratatui::widgets::{Clear, Widget as _};
+
+                let anchor_x = app.tab_regions.iter()
+                    .find(|r| matches!(r.kind, TabRegionKind::Account))
+                    .map(|r| r.x_start)
+                    .unwrap_or(0);
+                let popup_y = 1u16;
+                let accounts = &app.config.accounts;
+                let max_name_len = accounts.iter().map(|a| a.name.len()).max().unwrap_or(5);
+                let popup_w = (max_name_len + 4) as u16;
+                let popup_h = accounts.len() as u16;
+                let popup_area = ratatui::layout::Rect::new(
+                    anchor_x,
+                    popup_y,
+                    popup_w.min(size.width.saturating_sub(anchor_x)),
+                    popup_h.min(size.height.saturating_sub(popup_y)),
+                );
+
+                Clear.render(popup_area, frame.buffer_mut());
+
+                for (i, acct) in accounts.iter().enumerate() {
+                    if i as u16 >= popup_area.height {
+                        break;
+                    }
+                    let is_selected = i == app.account_picker_selected;
+                    let style = if is_selected {
+                        S::default().bg(C::Blue).fg(C::White).add_modifier(M::BOLD)
+                    } else {
+                        S::default().bg(C::Indexed(236)).fg(C::White)
+                    };
+                    let label = format!(" {:<width$} ", acct.name, width = max_name_len);
+                    let y = popup_area.y + i as u16;
+                    frame.buffer_mut().set_string(popup_area.x, y, &label, style);
+                    if is_selected {
+                        let sel_style = S::default().bg(C::Blue).fg(C::Cyan);
+                        frame.buffer_mut().set_string(popup_area.x, y, "\u{25b8}", sel_style);
+                    }
+                }
             }
         })?;
 
@@ -2374,15 +2585,57 @@ pub async fn run(mut app: App) -> Result<()> {
             _ = tokio::time::sleep(timeout) => None,
         };
 
-        // Handle mouse events (border drag to resize list/preview split)
+        // Handle mouse events
         if let Some(Event::Mouse(mouse)) = event {
             use crossterm::event::{MouseEventKind, MouseButton};
+
+            // Dismiss account picker on click outside
+            if app.mode == InputMode::AccountPicker {
+                if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                    // Simple: any click dismisses the picker, and if it's on
+                    // a valid account row, we switch to it.
+                    app.mode = InputMode::Normal;
+                }
+                continue;
+            }
+
             if app.mode == InputMode::Normal || app.mode == InputMode::Search {
                 let size = terminal.size()?;
                 let border_col = (size.width as u32 * app.list_pct as u32 / 100) as u16;
                 let in_content = mouse.row > 0 && mouse.row < size.height.saturating_sub(1);
+                let on_tab_bar = mouse.row == 0;
 
                 match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) if on_tab_bar => {
+                        // Check tab bar regions
+                        let col = mouse.column;
+                        for region in &app.tab_regions {
+                            if col >= region.x_start && col < region.x_end {
+                                match &region.kind {
+                                    TabRegionKind::Account => {
+                                        if app.config.accounts.len() > 1 {
+                                            app.account_picker_selected = app.active_account;
+                                            app.mode = InputMode::AccountPicker;
+                                        }
+                                    }
+                                    TabRegionKind::Tab(i) => {
+                                        let folder = app.tabs[*i].clone();
+                                        if folder != app.current_folder {
+                                            if let Err(e) = app.navigate_folder(&folder).await {
+                                                app.set_status(format!("Error: {}", e));
+                                            }
+                                        }
+                                    }
+                                    TabRegionKind::Overflow => {
+                                        app.folder_filter.clear();
+                                        app.folder_selected = 0;
+                                        app.mode = InputMode::FolderPicker;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
                     MouseEventKind::Down(MouseButton::Left) if in_content => {
                         // Start drag if clicking within 1 col of the border
                         if mouse.column.abs_diff(border_col) <= 1 {
@@ -2461,6 +2714,35 @@ pub async fn run(mut app: App) -> Result<()> {
                     if key.code == crossterm::event::KeyCode::Up {
                         app.palette_selected = app.palette_selected.saturating_sub(1);
                         continue;
+                    }
+                }
+                InputMode::AccountPicker => {
+                    match key.code {
+                        crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
+                            if app.account_picker_selected + 1 < app.config.accounts.len() {
+                                app.account_picker_selected += 1;
+                            }
+                            continue;
+                        }
+                        crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Char('k') => {
+                            app.account_picker_selected = app.account_picker_selected.saturating_sub(1);
+                            continue;
+                        }
+                        crossterm::event::KeyCode::Enter => {
+                            let idx = app.account_picker_selected;
+                            app.mode = InputMode::Normal;
+                            if idx != app.active_account {
+                                if let Err(e) = app.switch_account(idx).await {
+                                    app.set_status(format!("Account switch error: {}", e));
+                                }
+                            }
+                            continue;
+                        }
+                        crossterm::event::KeyCode::Esc => {
+                            app.mode = InputMode::Normal;
+                            continue;
+                        }
+                        _ => { continue; }
                     }
                 }
                 _ => {}

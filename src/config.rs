@@ -54,6 +54,9 @@ pub struct AccountConfig {
     pub default: bool,
     /// Per-account sync command (overrides global sync_command).
     pub sync_command: Option<String>,
+    /// Tab bar order. Wildcards: "/" = remaining maildirs, "#" = remaining splits, "@" = remaining smart folders.
+    /// Default when omitted: ["/Inbox", "#", "/", "@"]
+    pub tabs: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------

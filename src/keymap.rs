@@ -14,6 +14,7 @@ pub enum InputMode {
     SmartFolderCreate,
     SmartFolderName,
     MaildirCreate,
+    AccountPicker,
     MoveToFolder,
 }
 
@@ -99,6 +100,9 @@ pub enum Action {
 
     // Splits
     CreateSplit,
+
+    // Account picker
+    OpenAccountPicker,
 
     // Custom bindings
     RunShell {
@@ -292,6 +296,7 @@ pub fn parse_action_name(name: &str) -> Result<Action, String> {
         "show_help" | "help" => Ok(Action::ShowHelp),
         "sync_mail" | "sync" => Ok(Action::SyncMail),
         "create_split" => Ok(Action::CreateSplit),
+        "open_account_picker" | "account_picker" => Ok(Action::OpenAccountPicker),
         "quit" => Ok(Action::Quit),
         _ => Err(format!("unknown action: {:?}", name)),
     }
@@ -442,7 +447,8 @@ impl KeyMapper {
             | InputMode::CommandPalette
             | InputMode::SmartFolderCreate
             | InputMode::SmartFolderName
-            | InputMode::MaildirCreate => {
+            | InputMode::MaildirCreate
+            | InputMode::AccountPicker => {
                 return self.handle_input(key);
             }
             _ => {}
@@ -589,6 +595,7 @@ impl KeyMapper {
             (KeyCode::Char('g'), KeyCode::Char('!')) => Action::GoSpam,
             (KeyCode::Char('g'), KeyCode::Char('l')) => Action::GoFolderPicker,
             // g-prefix account switching
+            (KeyCode::Char('g'), KeyCode::Char('A')) => Action::OpenAccountPicker,
             (KeyCode::Char('g'), KeyCode::Tab) => Action::NextAccount,
             (KeyCode::Char('g'), KeyCode::BackTab) => Action::PrevAccount,
             _ => Action::Noop,
@@ -797,6 +804,7 @@ mod tests {
             "move_down",
             "sync_mail",
             "create_split",
+            "open_account_picker",
             "quit",
             "open_thread",
             "compose",
