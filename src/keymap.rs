@@ -64,6 +64,7 @@ pub enum Action {
 
     // Multi-select
     ToggleSelect,
+    SelectAll,
     SelectDown,
     SelectUp,
 
@@ -196,6 +197,13 @@ fn parse_key_combo(s: &str) -> Result<KeyCombo, String> {
             modifiers: KeyModifiers::SHIFT,
         });
     }
+    if let Some(rest) = lower.strip_prefix("super+") {
+        let code = parse_key_name(rest)?;
+        return Ok(KeyCombo {
+            code,
+            modifiers: KeyModifiers::SUPER,
+        });
+    }
 
     // Single character
     if s.len() == 1 {
@@ -276,6 +284,7 @@ pub fn parse_action_name(name: &str) -> Result<Action, String> {
         "filter_starred" => Ok(Action::FilterStarred),
         "filter_needs_reply" => Ok(Action::FilterNeedsReply),
         "toggle_select" => Ok(Action::ToggleSelect),
+        "select_all" => Ok(Action::SelectAll),
         "select_down" => Ok(Action::SelectDown),
         "select_up" => Ok(Action::SelectUp),
         "open_thread" => Ok(Action::OpenThread),
@@ -532,6 +541,8 @@ impl KeyMapper {
 
             // Multi-select
             (KeyCode::Char('x'), KeyModifiers::NONE) => Action::ToggleSelect,
+            (KeyCode::Char('a'), KeyModifiers::SUPER) => Action::SelectAll,
+            (KeyCode::Char('a'), KeyModifiers::CONTROL) => Action::SelectAll,
             (KeyCode::Char('J'), KeyModifiers::SHIFT) => Action::SelectDown,
             (KeyCode::Char('K'), KeyModifiers::SHIFT) => Action::SelectUp,
 
@@ -735,6 +746,17 @@ mod tests {
             KeyTrigger::Single(KeyCombo {
                 code: KeyCode::Char('r'),
                 modifiers: KeyModifiers::CONTROL,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_super_combo() {
+        assert_eq!(
+            parse_key_string("super+a").unwrap(),
+            KeyTrigger::Single(KeyCombo {
+                code: KeyCode::Char('a'),
+                modifiers: KeyModifiers::SUPER,
             })
         );
     }

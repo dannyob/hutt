@@ -287,11 +287,12 @@ to open the command palette and fuzzy-search any action.
 
 ### Selection
 
-| Key | Action                   |
-|-----|--------------------------|
-| `x` | Toggle select            |
-| `J` | Select + move down       |
-| `K` | Select + move up         |
+| Key              | Action                   |
+|------------------|--------------------------|
+| `x`              | Toggle select            |
+| `Cmd+a` / `Ctrl+a` | Select all (toggle)   |
+| `J`              | Select + move down       |
+| `K`              | Select + move up         |
 
 Triage actions (e, #, !, u, s) apply to all selected messages when a
 selection is active.
