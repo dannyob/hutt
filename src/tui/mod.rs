@@ -227,6 +227,8 @@ pub struct App {
     // When true, collect_known_folders() will rescan the maildir tree.
     // Set on reindex and account switch; cleared after scan.
     pub known_folders_dirty: bool,
+    // Queue of (folder_name, query_string) pairs to prefetch during idle time.
+    pub prefetch_queue: Vec<(String, String)>,
 
     // List/preview split (percentage for list pane, 10..90)
     pub list_pct: u16,
@@ -289,6 +291,65 @@ impl App {
         self.account().map(|a| a.name.as_str()).unwrap_or("")
     }
 
+    /// Build the mu query string for a given folder name (without filters).
+    /// Used for prefetch — we prefetch the base query without filter flags.
+    fn query_for_folder(&self, folder: &str) -> String {
+        if let Some(q) = self.smart_folder_queries.get(folder) {
+            q.clone()
+        } else if let Some(q) = self.split_queries.get(folder) {
+            let inbox_folder = self.account()
+                .map(|a| a.folders.inbox.clone())
+                .unwrap_or_else(|| "/Inbox".to_string());
+            format!("maildir:{} AND ({})", inbox_folder, q)
+        } else if folder.starts_with('/') {
+            format!("maildir:{}", folder)
+        } else {
+            folder.to_string()
+        }
+    }
+
+    /// Queue prefetch for adjacent tabs not already in the cache.
+    /// Called after load_folder() completes.
+    fn queue_prefetch(&mut self) {
+        self.prefetch_queue.clear();
+        if self.tabs.is_empty() {
+            return;
+        }
+        // Find current tab index
+        let cur_idx = self.tabs.iter().position(|t| t == &self.current_folder);
+
+        // Build prefetch list: neighbors first, then remaining tabs
+        let mut to_prefetch: Vec<String> = Vec::new();
+        if let Some(idx) = cur_idx {
+            // Next tab, previous tab, then expanding outward
+            let len = self.tabs.len();
+            for delta in 1..len {
+                let next = (idx + delta) % len;
+                to_prefetch.push(self.tabs[next].clone());
+                if delta < len {
+                    let prev = (idx + len - delta) % len;
+                    if prev != next {
+                        to_prefetch.push(self.tabs[prev].clone());
+                    }
+                }
+            }
+        } else {
+            // Current folder not in tabs — prefetch all tabs
+            to_prefetch = self.tabs.clone();
+        }
+
+        // Filter out already-cached folders
+        for folder in to_prefetch {
+            let query = self.query_for_folder(&folder);
+            if !self.folder_cache.contains_key(&query) {
+                self.prefetch_queue.push((folder, query));
+            }
+        }
+        if !self.prefetch_queue.is_empty() {
+            debug_log!("prefetch: queued {} folders", self.prefetch_queue.len());
+        }
+    }
+
     /// Invalidate the folder query cache. Called after triage, reindex,
     /// and account switch — any event that changes mu's data.
     fn invalidate_folder_cache(&mut self) {
@@ -296,6 +357,7 @@ impl App {
             debug_log!("invalidate_folder_cache: clearing {} entries", self.folder_cache.len());
             self.folder_cache.clear();
         }
+        self.prefetch_queue.clear();
         self.known_folders_dirty = true;
     }
 
@@ -460,6 +522,7 @@ impl App {
             account_picker_selected: 0,
             folder_cache: HashMap::new(),
             known_folders_dirty: true,
+            prefetch_queue: Vec::new(),
             list_pct: 35,
             dragging_border: false,
             help_scroll: 0,
@@ -503,6 +566,7 @@ impl App {
             self.collect_known_folders();
             self.known_folders_dirty = false;
         }
+        self.queue_prefetch();
         Ok(())
     }
 
@@ -545,6 +609,15 @@ impl App {
             }
         }
         debug_log!("split_excluded total: {} docids", self.split_excluded.len());
+
+        // Invalidate cached inbox query since split exclusions changed.
+        // Also invalidate cached split folder queries.
+        let inbox_query = format!("maildir:{}", inbox_folder);
+        self.folder_cache.remove(&inbox_query);
+        for split in &self.splits {
+            let q = format!("maildir:{} AND ({})", inbox_folder, split.query);
+            self.folder_cache.remove(&q);
+        }
     }
 
     fn build_query(&self) -> String {
@@ -2545,6 +2618,32 @@ pub async fn run(mut app: App) -> Result<()> {
             debug_log!("IPC drain: {:?}", cmd);
             if let Err(e) = app.handle_ipc_command(cmd).await {
                 app.set_status(format!("IPC error: {}", e));
+            }
+        }
+
+        // Background prefetch: run one queued query per loop iteration
+        // during idle time. Each query is fast (~1-100ms) so input lag
+        // is imperceptible. Skip if indexing (mu server is busy).
+        if !app.prefetch_queue.is_empty() && !app.indexing {
+            let (folder, query) = app.prefetch_queue.remove(0);
+            if !app.folder_cache.contains_key(&query) {
+                debug_log!("prefetch: fetching {:?}", folder);
+                match app.mu.find(&query, &FindOpts::default()).await {
+                    Ok(mut envelopes) => {
+                        // Apply split exclusion for inbox queries
+                        let is_inbox = app.account()
+                            .map(|a| a.folders.inbox.as_str())
+                            .unwrap_or("/Inbox") == folder;
+                        if is_inbox && !app.split_excluded.is_empty() {
+                            envelopes.retain(|e| !app.split_excluded.contains(&e.docid));
+                        }
+                        debug_log!("prefetch: cached {:?} ({} envelopes)", folder, envelopes.len());
+                        app.folder_cache.insert(query, envelopes);
+                    }
+                    Err(e) => {
+                        debug_log!("prefetch: error for {:?}: {}", folder, e);
+                    }
+                }
             }
         }
 
