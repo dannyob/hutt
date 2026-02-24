@@ -30,7 +30,7 @@ use crate::compose;
 use crate::config::Config;
 use crate::envelope::{flags_from_string, group_into_conversations, Conversation, Envelope};
 use crate::keymap::{Action, InputMode, KeyMapper};
-use crate::links::{self, HuttUrl, IpcCommand, IpcListener};
+use crate::links::{self, HuttUrl, IpcCommand, IpcListener, IpcResponse};
 use crate::mime_render::{self, RenderCache};
 use crate::mu_client::{FindOpts, MuClient};
 use crate::send;
@@ -1773,7 +1773,36 @@ impl App {
         Ok(())
     }
 
-    async fn handle_ipc_command(&mut self, cmd: IpcCommand) -> Result<()> {
+    /// Run find_capturing to get raw sexp strings for IPC response.
+    /// Separate from the TUI's own find/load_folder so TUI state is unaffected.
+    async fn capture_envelopes(&mut self, query: &str, opts: &FindOpts) -> IpcResponse {
+        match self.mu.find_capturing(query, opts).await {
+            Ok((_envelopes, raw_sexps)) => IpcResponse::MuFrames { frames: raw_sexps },
+            Err(e) => IpcResponse::Error { message: format!("capture error: {}", e) },
+        }
+    }
+
+    /// Resolve account index from optional account name / muhome path.
+    /// muhome takes precedence. Returns None if specified but not found,
+    /// Some(active_account) if neither specified.
+    fn resolve_mu_target(&self, account: Option<&str>, muhome: Option<&str>) -> Option<usize> {
+        if let Some(mh) = muhome {
+            for (idx, _acct) in self.config.accounts.iter().enumerate() {
+                if let Some(effective) = self.config.effective_muhome(idx) {
+                    if effective == mh {
+                        return Some(idx);
+                    }
+                }
+            }
+            return None;
+        }
+        if let Some(name) = account {
+            return self.config.accounts.iter().position(|a| a.name == *name);
+        }
+        Some(self.active_account)
+    }
+
+    async fn handle_ipc_command(&mut self, cmd: IpcCommand) -> Result<IpcResponse> {
         debug_log!("handle_ipc_command: {:?}", cmd);
         match cmd {
             IpcCommand::Open(url_serde) => {
@@ -1785,12 +1814,13 @@ impl App {
                         debug_log!("IPC Message: query={}", query);
                         self.mode = InputMode::Normal;
                         self.thread_messages.clear();
-                        self.current_folder = query;
+                        self.current_folder = query.clone();
                         match self.load_folder().await {
                             Ok(()) => debug_log!("IPC Message: loaded {} envelopes", self.envelopes.len()),
                             Err(e) => debug_log!("IPC Message: load error: {}", e),
                         }
                         self.set_status(format!("Opened message {}", id));
+                        Ok(self.capture_envelopes(&query, &FindOpts::default()).await)
                     }
                     HuttUrl::Thread { id, account } => {
                         self.switch_to_account_if_needed(&account).await?;
@@ -1812,9 +1842,19 @@ impl App {
                                 Err(e) => debug_log!("IPC Thread: open_thread error: {}", e),
                             }
                             self.set_status(format!("Opened thread {}", id));
+                            // Capture thread envelopes for response
+                            let opts = FindOpts {
+                                include_related: true,
+                                descending: false,
+                                ..FindOpts::default()
+                            };
+                            Ok(self.capture_envelopes(&query, &opts).await)
                         } else {
                             debug_log!("IPC Thread: message not found");
                             self.set_status(format!("Message not found: {}", id));
+                            Ok(IpcResponse::Error {
+                                message: format!("message not found: {}", id),
+                            })
                         }
                     }
                     HuttUrl::Search { query, account } => {
@@ -1828,6 +1868,9 @@ impl App {
                             Err(e) => debug_log!("IPC Search: load error: {}", e),
                         }
                         self.set_status(format!("Search: {}", query));
+                        // Capture uses build_query() since load_folder may expand the query
+                        let expanded = self.build_query();
+                        Ok(self.capture_envelopes(&expanded, &FindOpts::default()).await)
                     }
                     HuttUrl::Compose { to, subject, account } => {
                         self.switch_to_account_if_needed(&account).await?;
@@ -1840,6 +1883,7 @@ impl App {
                         self.compose_pending =
                             Some(compose::ComposePending::Ready(ctx));
                         self.set_status("Compose from URL");
+                        Ok(IpcResponse::Ok)
                     }
                 }
             }
@@ -1852,12 +1896,58 @@ impl App {
                     Ok(()) => debug_log!("IPC Navigate: loaded {} envelopes", self.envelopes.len()),
                     Err(e) => debug_log!("IPC Navigate: error: {}", e),
                 }
+                // Capture using the expanded query (after navigate set current_folder)
+                let expanded = self.build_query();
+                Ok(self.capture_envelopes(&expanded, &FindOpts::default()).await)
             }
             IpcCommand::Quit => {
                 self.should_quit = true;
+                Ok(IpcResponse::Ok)
+            }
+            IpcCommand::MuCommand { sexp, account, muhome } => {
+                let target_idx = self.resolve_mu_target(account.as_deref(), muhome.as_deref());
+                match target_idx {
+                    Some(idx) => {
+                        if idx == self.active_account && self.indexing {
+                            return Ok(IpcResponse::Error {
+                                message: "mu server is busy (indexing)".to_string(),
+                            });
+                        }
+                        let mu = if idx == self.active_account {
+                            &mut self.mu
+                        } else {
+                            match self.background_mu.get_mut(&idx) {
+                                Some(mu) => mu,
+                                None => return Ok(IpcResponse::Error {
+                                    message: format!(
+                                        "no mu server for account '{}'",
+                                        self.config.accounts.get(idx)
+                                            .map(|a| a.name.as_str()).unwrap_or("?")
+                                    ),
+                                }),
+                            }
+                        };
+                        match mu.send_raw(&sexp).await {
+                            Ok(frames) => {
+                                if sexp.starts_with("(move")
+                                    || sexp.starts_with("(remove")
+                                    || sexp.starts_with("(index")
+                                {
+                                    self.invalidate_folder_cache();
+                                }
+                                Ok(IpcResponse::MuFrames { frames })
+                            }
+                            Err(e) => Ok(IpcResponse::Error {
+                                message: format!("mu error: {}", e),
+                            }),
+                        }
+                    }
+                    None => Ok(IpcResponse::Error {
+                        message: "no matching account for muhome/account".to_string(),
+                    }),
+                }
             }
         }
-        Ok(())
     }
 
     // ── Action dispatch ─────────────────────────────────────────────
@@ -2665,7 +2755,7 @@ pub async fn run(mut app: App) -> Result<()> {
     let (shell_tx, mut shell_rx) = tokio::sync::mpsc::unbounded_channel();
     app.shell_tx = shell_tx;
 
-    let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<IpcCommand>();
+    let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<(IpcCommand, tokio::net::UnixStream)>();
     let _ipc_guard = match IpcListener::bind() {
         Ok(listener) => {
             let tx = ipc_tx;
@@ -2673,9 +2763,9 @@ pub async fn run(mut app: App) -> Result<()> {
                 debug_log!("IPC listener started");
                 loop {
                     match listener.accept().await {
-                        Ok(cmd) => {
+                        Ok((cmd, stream)) => {
                             debug_log!("IPC accepted: {:?}", cmd);
-                            if tx.send(cmd).is_err() {
+                            if tx.send((cmd, stream)).is_err() {
                                 debug_log!("IPC channel closed, exiting");
                                 break;
                             }
@@ -3186,10 +3276,17 @@ pub async fn run(mut app: App) -> Result<()> {
         }
 
         // Drain any pending IPC commands before blocking on input
-        while let Ok(cmd) = ipc_rx.try_recv() {
+        while let Ok((cmd, mut stream)) = ipc_rx.try_recv() {
             debug_log!("IPC drain: {:?}", cmd);
-            if let Err(e) = app.handle_ipc_command(cmd).await {
-                app.set_status(format!("IPC error: {}", e));
+            let resp = match app.handle_ipc_command(cmd).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    app.set_status(format!("IPC error: {}", e));
+                    IpcResponse::Error { message: e.to_string() }
+                }
+            };
+            if let Err(e) = links::send_response(&mut stream, &resp).await {
+                debug_log!("IPC response error: {}", e);
             }
         }
 
@@ -3238,10 +3335,17 @@ pub async fn run(mut app: App) -> Result<()> {
         let event = tokio::select! {
             ev = event_stream.next() => ev.and_then(|r| r.ok()),
             cmd = ipc_rx.recv() => {
-                if let Some(cmd) = cmd {
+                if let Some((cmd, mut stream)) = cmd {
                     debug_log!("IPC select: {:?}", cmd);
-                    if let Err(e) = app.handle_ipc_command(cmd).await {
-                        app.set_status(format!("IPC error: {}", e));
+                    let resp = match app.handle_ipc_command(cmd).await {
+                        Ok(resp) => resp,
+                        Err(e) => {
+                            app.set_status(format!("IPC error: {}", e));
+                            IpcResponse::Error { message: e.to_string() }
+                        }
+                    };
+                    if let Err(e) = links::send_response(&mut stream, &resp).await {
+                        debug_log!("IPC response error: {}", e);
                     }
                 }
                 continue;

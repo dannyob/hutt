@@ -12,9 +12,17 @@ mod splits;
 mod tui;
 mod undo;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Output format for remote commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputFormat {
+    Silent,
+    Sexp,
+    Json,
+}
 
 fn print_help() {
     eprintln!(
@@ -24,6 +32,7 @@ USAGE:
     hutt [OPTIONS] [FOLDER]          Launch the TUI
     hutt remote <COMMAND> [ARGS]     Send command to a running instance
     hutt r <COMMAND> [ARGS]          (shorthand for remote)
+    hutt server [OPTIONS]            Run as mu server proxy (drop-in replacement)
     hutt config path                 Print config file path
 
 OPTIONS:
@@ -37,6 +46,9 @@ OPTIONS:
     --no-background-servers     Disable background mu servers
     --vim                       Vi-style editing in search/input fields
     --no-vim                    Emacs-style editing (default)
+    --sexp                      (remote) Print results as S-expressions
+    --json                      (remote) Print results as JSON (ndjson)
+    --wrapped                   (remote) Wrap output as single object
 
 REMOTE COMMANDS:
     open <MESSAGE-ID>           Open a message by Message-ID
@@ -65,6 +77,12 @@ EXAMPLES:
     hutt r search --account=work from:alice
     hutt r compose --to=bob@example.com --subject=\"Hello\"
     hutt r open-url 'mid:abc@example.com?view=thread'
+    hutt r --json search from:alice     Search and output ndjson
+    hutt r --sexp thread abc@host.com   Thread envelopes as sexp
+    hutt r --json search q | jq '.path' Extract file paths with jq
+    hutt server                     Interactive mu server proxy
+    hutt server --eval '(ping)'    Single command evaluation
+    hutt server --muhome ~/.mu/work Select account by muhome
 
 ENVIRONMENT:
     HUTT_LOG=<path>             Debug log file (same as --log)
@@ -78,6 +96,11 @@ fn print_remote_help() {
 
 USAGE:
     hutt remote <COMMAND> [ARGS]
+
+OUTPUT FLAGS:
+    --sexp                  Print results as S-expressions (one per line)
+    --json                  Print results as JSON (ndjson, one per line)
+    --wrapped               Wrap output in a single object/list
 
 COMMANDS:
     open <MESSAGE-ID>           Open a message by Message-ID
@@ -113,6 +136,34 @@ fn extract_account(args: &[String]) -> (Option<String>, Vec<String>) {
     (account, rest)
 }
 
+/// Extract --sexp, --json, --wrapped from args, returning (format, wrapped, remaining).
+fn extract_output_flags(args: &[String]) -> Result<(OutputFormat, bool, Vec<String>)> {
+    let mut format = OutputFormat::Silent;
+    let mut wrapped = false;
+    let mut rest = Vec::new();
+
+    for arg in args {
+        match arg.as_str() {
+            "--sexp" => {
+                if format == OutputFormat::Json {
+                    bail!("--sexp and --json are mutually exclusive");
+                }
+                format = OutputFormat::Sexp;
+            }
+            "--json" => {
+                if format == OutputFormat::Sexp {
+                    bail!("--sexp and --json are mutually exclusive");
+                }
+                format = OutputFormat::Json;
+            }
+            "--wrapped" => wrapped = true,
+            _ => rest.push(arg.clone()),
+        }
+    }
+
+    Ok((format, wrapped, rest))
+}
+
 fn run_config(args: &[String]) -> Result<()> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("path");
     match sub {
@@ -138,7 +189,78 @@ USAGE:
     Ok(())
 }
 
+/// Format and print IPC response according to output flags.
+fn print_ipc_output(resp: &links::IpcResponse, format: OutputFormat, wrapped: bool) {
+    match resp {
+        links::IpcResponse::Ok => {
+            if wrapped {
+                match format {
+                    OutputFormat::Sexp => println!("(:found 0)"),
+                    OutputFormat::Json => println!("{{\"found\":0}}"),
+                    OutputFormat::Silent => {}
+                }
+            }
+        }
+        links::IpcResponse::Error { message } => {
+            match format {
+                OutputFormat::Sexp => {
+                    println!(
+                        "(:error \"{}\")",
+                        message.replace('\\', "\\\\").replace('"', "\\\"")
+                    );
+                }
+                OutputFormat::Json => {
+                    let obj = serde_json::json!({"error": message});
+                    println!("{}", obj);
+                }
+                OutputFormat::Silent => {}
+            }
+        }
+        links::IpcResponse::MuFrames { frames } => {
+            match format {
+                OutputFormat::Silent => {}
+                OutputFormat::Sexp => {
+                    if wrapped {
+                        let joined = frames.join(" ");
+                        println!("(:headers ({}) :found {})", joined, frames.len());
+                    } else {
+                        for frame in frames {
+                            println!("{}", frame);
+                        }
+                    }
+                }
+                OutputFormat::Json => {
+                    if wrapped {
+                        let json_vals: Vec<serde_json::Value> = frames
+                            .iter()
+                            .filter_map(|s| mu_sexp::sexp_to_json(s).ok())
+                            .collect();
+                        let obj = serde_json::json!({
+                            "headers": json_vals,
+                            "found": frames.len(),
+                        });
+                        println!("{}", obj);
+                    } else {
+                        for frame in frames {
+                            if let Ok(json) = mu_sexp::sexp_to_json(frame) {
+                                println!("{}", json);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn run_remote(args: &[String]) -> Result<()> {
+    if args.is_empty() {
+        print_remote_help();
+        std::process::exit(1);
+    }
+
+    let (format, wrapped, args) = extract_output_flags(args)?;
+
     if args.is_empty() {
         print_remote_help();
         std::process::exit(1);
@@ -205,7 +327,224 @@ async fn run_remote(args: &[String]) -> Result<()> {
         other => bail!("unknown remote command: '{}'\nRun 'hutt remote --help' for usage", other),
     };
 
-    links::send_ipc_command(&cmd).await
+    let resp = links::send_ipc_command(&cmd).await?;
+
+    // Print structured output if requested
+    print_ipc_output(&resp, format, wrapped);
+
+    match &resp {
+        links::IpcResponse::Error { message } => {
+            if format == OutputFormat::Silent {
+                bail!("hutt: {}", message);
+            }
+            // Already printed structured error above
+            std::process::exit(1);
+        }
+        _ => Ok(()),
+    }
+}
+
+fn print_server_help() {
+    eprintln!(
+        "hutt server — mu server proxy (drop-in replacement for mu server)
+
+USAGE:
+    hutt server [OPTIONS]
+
+OPTIONS:
+    -h, --help              Show help
+    --commands              List available mu commands
+    --eval TEXT             Evaluate a single mu server expression
+    --allow-temp-file       Accepted for compatibility (ignored)
+    --muhome <dir>          Select account by muhome path
+    --account <name>        Select account by name
+    -a <name>               (same as --account)
+
+When hutt is running, proxies through its mu server. Falls back
+to standalone mu server otherwise."
+    );
+}
+
+async fn run_server(args: &[String]) -> Result<()> {
+    let mut muhome: Option<String> = None;
+    let mut account: Option<String> = None;
+    let mut eval: Option<String> = None;
+    let mut i = 0;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "-h" | "--help" => {
+                print_server_help();
+                return Ok(());
+            }
+            "--commands" => {
+                println!("commands: compose contacts find index move ping quit remove");
+                return Ok(());
+            }
+            "--eval" => {
+                i += 1;
+                eval = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow::anyhow!("--eval requires TEXT"))?
+                        .clone(),
+                );
+            }
+            "--allow-temp-file" => {}
+            "--muhome" => {
+                i += 1;
+                muhome = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow::anyhow!("--muhome requires a path"))?
+                        .clone(),
+                );
+            }
+            "--account" | "-a" => {
+                i += 1;
+                account = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow::anyhow!("--account requires a name"))?
+                        .clone(),
+                );
+            }
+            other => {
+                eprintln!("Unknown option: {}", other);
+                print_server_help();
+                std::process::exit(1);
+            }
+        }
+        i += 1;
+    }
+
+    let hutt_available = links::socket_path().exists();
+
+    if let Some(ref eval_sexp) = eval {
+        if hutt_available {
+            return run_server_eval(eval_sexp, account, muhome).await;
+        }
+        return run_mu_fallback(args).await;
+    }
+
+    if hutt_available {
+        run_server_interactive(account, muhome).await
+    } else {
+        run_mu_fallback(args).await
+    }
+}
+
+async fn run_server_eval(
+    sexp: &str,
+    account: Option<String>,
+    muhome: Option<String>,
+) -> Result<()> {
+    let cmd = links::IpcCommand::MuCommand {
+        sexp: sexp.to_string(),
+        account,
+        muhome,
+    };
+    let resp = links::send_ipc_command(&cmd).await?;
+    match resp {
+        links::IpcResponse::MuFrames { frames } => {
+            use std::io::Write;
+            for frame in &frames {
+                let encoded = mu_sexp::encode_frame(frame);
+                std::io::stdout().write_all(&encoded)?;
+            }
+            std::io::stdout().flush()?;
+            Ok(())
+        }
+        links::IpcResponse::Error { message } => bail!("{}", message),
+        links::IpcResponse::Ok => Ok(()),
+    }
+}
+
+async fn run_server_interactive(
+    account: Option<String>,
+    muhome: Option<String>,
+) -> Result<()> {
+    use std::io::{BufRead, Write};
+
+    // Synthetic pong greeting
+    let greeting = mu_sexp::encode_frame(
+        &format!("(:pong \"hutt\" :props (:version \"{}\"))", VERSION),
+    );
+    std::io::stdout().write_all(&greeting)?;
+    std::io::stdout().flush()?;
+
+    let stdin = std::io::stdin();
+    for line in stdin.lock().lines() {
+        let line = line?;
+        let sexp = line.trim().to_string();
+        if sexp.is_empty() {
+            continue;
+        }
+        if sexp == "(quit)" {
+            break;
+        }
+
+        let cmd = links::IpcCommand::MuCommand {
+            sexp,
+            account: account.clone(),
+            muhome: muhome.clone(),
+        };
+
+        let write_error = |msg: &str| -> Result<()> {
+            let err_sexp = format!(
+                "(:error 1 :message \"{}\")",
+                msg.replace('\\', "\\\\").replace('"', "\\\"")
+            );
+            let encoded = mu_sexp::encode_frame(&err_sexp);
+            std::io::stdout().write_all(&encoded)?;
+            std::io::stdout().flush()?;
+            Ok(())
+        };
+
+        match links::send_ipc_command(&cmd).await {
+            Ok(resp) => match resp {
+                links::IpcResponse::MuFrames { frames } => {
+                    for frame in &frames {
+                        let encoded = mu_sexp::encode_frame(frame);
+                        std::io::stdout().write_all(&encoded)?;
+                    }
+                    std::io::stdout().flush()?;
+                }
+                links::IpcResponse::Error { message } => {
+                    write_error(&message)?;
+                }
+                links::IpcResponse::Ok => {}
+            },
+            Err(e) => {
+                write_error(&e.to_string())?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_mu_fallback(args: &[String]) -> Result<()> {
+    let mut mu_args = vec!["server".to_string()];
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--account" | "-a" => { i += 1; } // skip (not a mu flag)
+            other => mu_args.push(other.to_string()),
+        }
+        i += 1;
+    }
+
+    let status = tokio::process::Command::new("mu")
+        .args(&mu_args)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .await
+        .context("failed to run mu server")?;
+
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -228,6 +567,10 @@ async fn main() -> Result<()> {
             // Config subcommand
             "config" => {
                 return run_config(&args[i + 1..]);
+            }
+            // Server subcommand (drop-in mu server replacement)
+            "server" => {
+                return run_server(&args[i + 1..]).await;
             }
             // Help/version
             "-h" | "--help" => {
