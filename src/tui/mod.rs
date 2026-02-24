@@ -174,6 +174,13 @@ fn resolve_tabs(
     result
 }
 
+/// Pending confirmation action.
+#[derive(Debug, Clone)]
+pub enum ConfirmAction {
+    /// Delete the current folder (smart folder, split, or empty maildir).
+    DeleteFolder(String),
+}
+
 /// Sub-mode for vi-style editing within input fields (search bar, etc.).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VimSubMode {
@@ -199,6 +206,9 @@ pub struct App {
 
     // Mode
     pub mode: InputMode,
+
+    // Confirmation prompt: if Some, shows "prompt (y/n)" in status bar
+    pub pending_confirm: Option<ConfirmAction>,
 
     // Undo
     pub undo_stack: UndoStack,
@@ -637,6 +647,7 @@ impl App {
             keymap,
             should_quit: false,
             mode: InputMode::Normal,
+            pending_confirm: None,
             undo_stack: UndoStack::new(),
             selected_set: HashSet::new(),
             search_input: String::new(),
@@ -1400,6 +1411,74 @@ impl App {
         self.edit_folder(&folder).await;
     }
 
+    /// Delete a folder by name and navigate to inbox. Used by both
+    /// the folder picker (Ctrl+D) and normal mode (Ctrl+D with confirm).
+    async fn delete_folder(&mut self, folder: &str) -> Result<()> {
+        if let Some(name) = folder.strip_prefix('@') {
+            if let Some(pos) = self.smart_folders.iter().position(|sf| sf.name == name) {
+                let removed = self.smart_folders.remove(pos);
+                smart_folders::save_smart_folders(&self.smart_folders, self.account_name());
+                self.smart_folder_queries.remove(folder);
+                self.known_folders.retain(|f| f != folder);
+                self.rebuild_tabs();
+                self.undo_stack.push(UndoEntry {
+                    action: UndoAction::DeleteSmartFolder { folder: removed },
+                    description: format!("Deleted smart folder {}", name),
+                });
+                self.set_status(format!("Deleted smart folder \"{}\" (z to undo)", name));
+                // Navigate to inbox if we were viewing the deleted folder
+                if self.current_folder == folder {
+                    let inbox = self.account()
+                        .map(|a| a.folders.inbox.clone())
+                        .unwrap_or_else(|| "/Inbox".to_string());
+                    self.navigate_folder(&inbox).await?;
+                }
+            }
+        } else if let Some(name) = folder.strip_prefix('#') {
+            if let Some(pos) = self.splits.iter().position(|s| s.name == name) {
+                let removed = self.splits.remove(pos);
+                splits::save_splits(&self.splits, self.account_name());
+                self.split_queries.remove(folder);
+                self.known_folders.retain(|f| f != folder);
+                self.rebuild_tabs();
+                self.refresh_split_caches().await;
+                self.undo_stack.push(UndoEntry {
+                    action: UndoAction::DeleteSplit { split: removed },
+                    description: format!("Deleted split {}", name),
+                });
+                self.set_status(format!("Deleted split \"{}\" (z to undo)", name));
+                if self.current_folder == folder {
+                    let inbox = self.account()
+                        .map(|a| a.folders.inbox.clone())
+                        .unwrap_or_else(|| "/Inbox".to_string());
+                    self.navigate_folder(&inbox).await?;
+                }
+            }
+        } else if folder.starts_with('/') {
+            let maildir_info = self.account().map(|a| {
+                (expand_maildir_root(&a.maildir), a.folders.inbox.clone())
+            });
+            if let Some((root, inbox)) = maildir_info {
+                let full = format!("{}{}", root, folder);
+                let full_path = std::path::PathBuf::from(&full);
+                let _ = std::fs::remove_dir_all(&full_path);
+                self.known_folders.retain(|f| f != folder);
+                self.rebuild_tabs();
+                self.undo_stack.push(UndoEntry {
+                    action: UndoAction::DeleteMaildirFolder {
+                        path: folder.to_string(),
+                    },
+                    description: format!("Deleted folder {}", folder),
+                });
+                self.set_status(format!("Deleted folder \"{}\" (z to undo)", folder));
+                if self.current_folder == folder {
+                    self.navigate_folder(&inbox).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn delete_selected_folder(&mut self) {
         let filtered = self.filtered_folders();
         let folder = match filtered.get(self.folder_selected) {
@@ -1408,57 +1487,16 @@ impl App {
         };
 
         if folder.starts_with("+ ") {
-            // Can't delete special entries
             return;
         }
 
-        if let Some(name) = folder.strip_prefix('@') {
-            // Smart folder — remove from list and save
-            if let Some(pos) = self.smart_folders.iter().position(|sf| sf.name == name) {
-                let removed = self.smart_folders.remove(pos);
-                smart_folders::save_smart_folders(&self.smart_folders, self.account_name());
-                self.smart_folder_queries.remove(&folder);
-                self.known_folders.retain(|f| f != &folder);
-                self.rebuild_tabs();
-                self.undo_stack.push(UndoEntry {
-                    action: UndoAction::DeleteSmartFolder { folder: removed },
-                    description: format!("Deleted smart folder {}", name),
-                });
-                self.set_status(format!("Deleted smart folder \"{}\" (z to undo)", name));
-                // Clamp selection
-                let max = self.filtered_folders().len();
-                if self.folder_selected >= max && max > 0 {
-                    self.folder_selected = max - 1;
-                }
-            }
-        } else if let Some(name) = folder.strip_prefix('#') {
-            // Split — remove from list and save
-            if let Some(pos) = self.splits.iter().position(|s| s.name == name) {
-                let removed = self.splits.remove(pos);
-                splits::save_splits(&self.splits, self.account_name());
-                self.split_queries.remove(&folder);
-                self.known_folders.retain(|f| f != &folder);
-                self.rebuild_tabs();
-                self.refresh_split_caches().await;
-                self.undo_stack.push(UndoEntry {
-                    action: UndoAction::DeleteSplit { split: removed },
-                    description: format!("Deleted split {}", name),
-                });
-                self.set_status(format!("Deleted split \"{}\" (z to undo)", name));
-                let max = self.filtered_folders().len();
-                if self.folder_selected >= max && max > 0 {
-                    self.folder_selected = max - 1;
-                }
-            }
-        } else if folder.starts_with('/') {
-            // Maildir — check if empty, then delete
-            if let Some(account) = self.account() {
+        if folder.starts_with('/') {
+            // Maildir — check if empty before allowing delete
+            let is_empty = if let Some(account) = self.account() {
                 let root = expand_maildir_root(&account.maildir);
                 let full = format!("{}{}", root, folder);
                 let full_path = std::path::PathBuf::from(&full);
-
-                // Check if maildir is empty (no files in cur/, new/, tmp/)
-                let is_empty = ["cur", "new", "tmp"].iter().all(|sub| {
+                ["cur", "new", "tmp"].iter().all(|sub| {
                     let sub_dir = full_path.join(sub);
                     match std::fs::read_dir(&sub_dir) {
                         Ok(entries) => entries
@@ -1466,27 +1504,21 @@ impl App {
                             .all(|e| !e.path().is_file()),
                         Err(_) => true,
                     }
-                });
-
-                if is_empty {
-                    // Delete the directory
-                    let _ = std::fs::remove_dir_all(&full_path);
-                    self.known_folders.retain(|f| f != &folder);
-                    self.undo_stack.push(UndoEntry {
-                        action: UndoAction::DeleteMaildirFolder {
-                            path: folder.clone(),
-                        },
-                        description: format!("Deleted folder {}", folder),
-                    });
-                    self.set_status(format!("Deleted folder \"{}\" (z to undo)", folder));
-                    let max = self.filtered_folders().len();
-                    if self.folder_selected >= max && max > 0 {
-                        self.folder_selected = max - 1;
-                    }
-                } else {
-                    self.set_status("Folder not empty, cannot delete");
-                }
+                })
+            } else {
+                false
+            };
+            if !is_empty {
+                self.set_status("Folder not empty, cannot delete");
+                return;
             }
+        }
+
+        let _ = self.delete_folder(&folder).await;
+        // Clamp selection after deletion
+        let max = self.filtered_folders().len();
+        if self.folder_selected >= max && max > 0 {
+            self.folder_selected = max - 1;
         }
     }
 
@@ -2188,6 +2220,41 @@ impl App {
             Action::EditFolder => {
                 let folder = self.current_folder.clone();
                 self.edit_folder(&folder).await;
+            }
+
+            Action::DeleteFolder => {
+                let folder = self.current_folder.clone();
+                if folder.starts_with('@') || folder.starts_with('#') {
+                    let kind = if folder.starts_with('@') { "smart folder" } else { "split" };
+                    self.set_status(format!("Delete {} \"{}\"? (y/n)", kind, folder));
+                    self.pending_confirm = Some(ConfirmAction::DeleteFolder(folder));
+                } else if folder.starts_with('/') {
+                    // Check if empty first
+                    let is_empty = if let Some(account) = self.account() {
+                        let root = expand_maildir_root(&account.maildir);
+                        let full = format!("{}{}", root, folder);
+                        let full_path = std::path::PathBuf::from(&full);
+                        ["cur", "new", "tmp"].iter().all(|sub| {
+                            let sub_dir = full_path.join(sub);
+                            match std::fs::read_dir(&sub_dir) {
+                                Ok(entries) => entries
+                                    .filter_map(|e| e.ok())
+                                    .all(|e| !e.path().is_file()),
+                                Err(_) => true,
+                            }
+                        })
+                    } else {
+                        false
+                    };
+                    if is_empty {
+                        self.set_status(format!("Delete empty folder \"{}\"? (y/n)", folder));
+                        self.pending_confirm = Some(ConfirmAction::DeleteFolder(folder));
+                    } else {
+                        self.set_status("Folder not empty, cannot delete".to_string());
+                    }
+                } else {
+                    self.set_status("Only smart folders (@), splits (#), and empty maildirs can be deleted".to_string());
+                }
             }
 
             // Text input
@@ -3301,6 +3368,25 @@ pub async fn run(mut app: App) -> Result<()> {
             }
             last_key_time = Instant::now();
 
+            // Confirmation prompt: y confirms, anything else cancels
+            if let Some(confirm) = app.pending_confirm.take() {
+                match key.code {
+                    crossterm::event::KeyCode::Char('y') | crossterm::event::KeyCode::Char('Y') => {
+                        match confirm {
+                            ConfirmAction::DeleteFolder(folder) => {
+                                if let Err(e) = app.delete_folder(&folder).await {
+                                    app.set_status(format!("Error: {}", e));
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        app.set_status("Cancelled".to_string());
+                    }
+                }
+                continue;
+            }
+
             // Search mode: route events to the TextArea, intercept control keys
             if app.mode == InputMode::Search {
                 let input: Input = key.into();
@@ -3692,6 +3778,20 @@ pub async fn run(mut app: App) -> Result<()> {
                             }
                         }
                     }
+                }
+                continue;
+            }
+
+            // Ctrl+D in normal mode: delete current folder (with confirmation)
+            if app.mode == InputMode::Normal
+                && key.code == crossterm::event::KeyCode::Char('d')
+                && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                && (app.current_folder.starts_with('@')
+                    || app.current_folder.starts_with('#')
+                    || app.current_folder.starts_with('/'))
+            {
+                if let Err(e) = app.handle_action(Action::DeleteFolder).await {
+                    app.set_status(format!("Error: {}", e));
                 }
                 continue;
             }
