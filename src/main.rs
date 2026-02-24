@@ -205,7 +205,13 @@ async fn run_remote(args: &[String]) -> Result<()> {
         other => bail!("unknown remote command: '{}'\nRun 'hutt remote --help' for usage", other),
     };
 
-    links::send_ipc_command(&cmd).await
+    let resp = links::send_ipc_command(&cmd).await?;
+    match resp {
+        links::IpcResponse::Ok | links::IpcResponse::MuFrames { .. } => Ok(()),
+        links::IpcResponse::Error { message } => {
+            bail!("hutt: {}", message);
+        }
+    }
 }
 
 #[tokio::main]
