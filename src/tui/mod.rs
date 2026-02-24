@@ -220,6 +220,14 @@ pub struct App {
     pub tab_regions: Vec<TabRegion>,
     pub account_picker_selected: usize,
 
+    // Folder query cache: query string → envelopes. Invalidated on
+    // triage, reindex, and account switch. Avoids round-tripping to mu
+    // when switching between previously-visited folders or toggling filters.
+    pub folder_cache: HashMap<String, Vec<Envelope>>,
+    // When true, collect_known_folders() will rescan the maildir tree.
+    // Set on reindex and account switch; cleared after scan.
+    pub known_folders_dirty: bool,
+
     // List/preview split (percentage for list pane, 10..90)
     pub list_pct: u16,
     pub dragging_border: bool,
@@ -279,6 +287,16 @@ impl App {
     /// Return the active account's name (for per-account file paths).
     fn account_name(&self) -> &str {
         self.account().map(|a| a.name.as_str()).unwrap_or("")
+    }
+
+    /// Invalidate the folder query cache. Called after triage, reindex,
+    /// and account switch — any event that changes mu's data.
+    fn invalidate_folder_cache(&mut self) {
+        if !self.folder_cache.is_empty() {
+            debug_log!("invalidate_folder_cache: clearing {} entries", self.folder_cache.len());
+            self.folder_cache.clear();
+        }
+        self.known_folders_dirty = true;
     }
 
     /// Adjust tab_scroll to keep the selected folder visible in the tab bar.
@@ -440,6 +458,8 @@ impl App {
             tab_scroll: 0,
             tab_regions: Vec::new(),
             account_picker_selected: 0,
+            folder_cache: HashMap::new(),
+            known_folders_dirty: true,
             list_pct: 35,
             dragging_border: false,
             help_scroll: 0,
@@ -458,19 +478,31 @@ impl App {
         let query = self.build_query();
         debug_log!("load_folder: query={:?} folder={:?}", query, self.current_folder);
         self.current_query = query.clone();
-        self.envelopes = self.mu.find(&query, &FindOpts::default()).await?;
-        // If viewing the inbox, exclude messages that belong to splits
-        if self.is_inbox_folder() && !self.split_excluded.is_empty() {
-            let before = self.envelopes.len();
-            self.envelopes.retain(|e| !self.split_excluded.contains(&e.docid));
-            debug_log!("load_folder: split exclusion removed {} envelopes", before - self.envelopes.len());
+
+        // Check folder cache before querying mu
+        if let Some(cached) = self.folder_cache.get(&query) {
+            debug_log!("load_folder: cache HIT ({} envelopes)", cached.len());
+            self.envelopes = cached.clone();
+        } else {
+            self.envelopes = self.mu.find(&query, &FindOpts::default()).await?;
+            // If viewing the inbox, exclude messages that belong to splits
+            if self.is_inbox_folder() && !self.split_excluded.is_empty() {
+                let before = self.envelopes.len();
+                self.envelopes.retain(|e| !self.split_excluded.contains(&e.docid));
+                debug_log!("load_folder: split exclusion removed {} envelopes", before - self.envelopes.len());
+            }
+            debug_log!("load_folder: cache MISS, got {} envelopes from mu", self.envelopes.len());
+            self.folder_cache.insert(query, self.envelopes.clone());
         }
-        debug_log!("load_folder: got {} envelopes", self.envelopes.len());
+
         self.selected = 0;
         self.scroll_offset = 0;
         self.preview_scroll = 0;
         self.rebuild_conversations();
-        self.collect_known_folders();
+        if self.known_folders_dirty {
+            self.collect_known_folders();
+            self.known_folders_dirty = false;
+        }
         Ok(())
     }
 
@@ -743,6 +775,7 @@ impl App {
         }
         let removed: HashSet<u32> = targets.iter().map(|(d, _, _)| *d).collect();
         self.envelopes.retain(|e| !removed.contains(&e.docid));
+        self.invalidate_folder_cache();
         self.rebuild_conversations();
         self.selected_set.clear();
         self.clamp_selection();
@@ -777,6 +810,7 @@ impl App {
                 e.flags = flags_from_string(&new_flags);
             }
         }
+        self.invalidate_folder_cache();
         self.selected_set.clear();
         self.set_status(format!("Toggled {} on {} message(s)", desc, count));
         Ok(())
@@ -830,6 +864,7 @@ impl App {
                     self.mu
                         .move_msg(docid, Some(&original_maildir), flags)
                         .await?;
+                    self.invalidate_folder_cache();
                     self.load_folder().await?;
                 }
                 UndoAction::DeleteSmartFolder { folder } => {
@@ -884,6 +919,9 @@ impl App {
         if index >= self.config.accounts.len() {
             return Ok(());
         }
+
+        // Clear caches for the old account
+        self.invalidate_folder_cache();
 
         // Quit current mu server
         self.mu.quit().await?;
@@ -2528,6 +2566,7 @@ pub async fn run(mut app: App) -> Result<()> {
                         // Index complete — reload folder
                         app.indexing = false;
                         debug_log!("reindex: complete, reloading folder");
+                        app.invalidate_folder_cache();
                         // Refresh split caches before reloading so inbox
                         // exclusions are up to date.
                         app.refresh_split_caches().await;
