@@ -277,6 +277,22 @@ pub enum IpcCommand {
         account: Option<String>,
     },
     Quit,
+    MuCommand {
+        sexp: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        muhome: Option<String>,
+    },
+}
+
+/// Response sent back to IPC clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status")]
+pub enum IpcResponse {
+    Ok,
+    Error { message: String },
+    MuFrames { frames: Vec<String> },
 }
 
 /// Serde-friendly mirror of `HuttUrl`.
@@ -329,7 +345,7 @@ impl From<HuttUrlSerde> for HuttUrl {
 }
 
 /// Determine the IPC socket path.
-fn socket_path() -> PathBuf {
+pub fn socket_path() -> PathBuf {
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
         PathBuf::from(dir).join("hutt.sock")
     } else {
@@ -358,24 +374,29 @@ impl IpcListener {
         Ok(Self { listener, path })
     }
 
-    /// Accept a single connection, read a JSON-encoded `IpcCommand`, and
-    /// return it.
-    pub async fn accept(&self) -> Result<IpcCommand> {
+    /// Accept a single connection, read a JSON-encoded `IpcCommand`,
+    /// and return it along with the stream for sending a response.
+    pub async fn accept(&self) -> Result<(IpcCommand, UnixStream)> {
         let (mut stream, _addr) = self
             .listener
             .accept()
             .await
             .context("accepting IPC connection")?;
 
+        // Read until the client shuts down their write side
         let mut buf = Vec::with_capacity(4096);
-        stream
-            .read_to_end(&mut buf)
-            .await
-            .context("reading IPC command")?;
+        loop {
+            let mut tmp = [0u8; 4096];
+            let n = stream.read(&mut tmp).await.context("reading IPC command")?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
 
         let cmd: IpcCommand =
             serde_json::from_slice(&buf).context("deserializing IPC command")?;
-        Ok(cmd)
+        Ok((cmd, stream))
     }
 }
 
@@ -385,8 +406,17 @@ impl Drop for IpcListener {
     }
 }
 
-/// Client side: connect to the running hutt instance and send a command.
-pub async fn send_ipc_command(cmd: &IpcCommand) -> Result<()> {
+/// Write a JSON-encoded IpcResponse to a stream.
+pub async fn send_response(stream: &mut UnixStream, resp: &IpcResponse) -> Result<()> {
+    let json = serde_json::to_vec(resp).context("serializing IPC response")?;
+    stream.write_all(&json).await.context("writing IPC response")?;
+    stream.shutdown().await.context("shutting down IPC response stream")?;
+    Ok(())
+}
+
+/// Client side: connect to the running hutt instance, send a command,
+/// and read back the response.
+pub async fn send_ipc_command(cmd: &IpcCommand) -> Result<IpcResponse> {
     let path = socket_path();
     if !path.exists() {
         bail!(
@@ -404,8 +434,19 @@ pub async fn send_ipc_command(cmd: &IpcCommand) -> Result<()> {
         .write_all(&json)
         .await
         .context("writing IPC command")?;
-    stream.shutdown().await.context("shutting down IPC stream")?;
-    Ok(())
+    // Shut down write side so the server knows we're done sending
+    stream.shutdown().await.context("shutting down write side")?;
+
+    // Read the response
+    let mut resp_buf = Vec::with_capacity(4096);
+    stream
+        .read_to_end(&mut resp_buf)
+        .await
+        .context("reading IPC response")?;
+
+    let resp: IpcResponse =
+        serde_json::from_slice(&resp_buf).context("deserializing IPC response")?;
+    Ok(resp)
 }
 
 // ---------------------------------------------------------------------------
@@ -774,6 +815,39 @@ mod tests {
         let encoded = url_encode(original);
         let decoded = url_decode(&encoded);
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn ipc_response_json_roundtrip() {
+        let resps = vec![
+            IpcResponse::Ok,
+            IpcResponse::Error { message: "not found".to_string() },
+            IpcResponse::MuFrames {
+                frames: vec![
+                    "(:docid 42 :subject \"Hello\")".to_string(),
+                    "(:docid 43 :subject \"World\")".to_string(),
+                ],
+            },
+        ];
+        for resp in &resps {
+            let json = serde_json::to_string(resp).unwrap();
+            let parsed: IpcResponse = serde_json::from_str(&json).unwrap();
+            let json2 = serde_json::to_string(&parsed).unwrap();
+            assert_eq!(json, json2);
+        }
+    }
+
+    #[test]
+    fn test_mu_command_serde() {
+        let cmd = IpcCommand::MuCommand {
+            sexp: "(ping)".to_string(),
+            account: Some("work".to_string()),
+            muhome: None,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let parsed: IpcCommand = serde_json::from_str(&json).unwrap();
+        let json2 = serde_json::to_string(&parsed).unwrap();
+        assert_eq!(json, json2);
     }
 
     #[test]

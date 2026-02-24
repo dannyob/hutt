@@ -66,6 +66,23 @@ impl FrameReader {
             self.buf.extend_from_slice(&tmp[..n]);
         }
     }
+
+    /// Like next_frame, but also returns the raw sexp string as received from mu.
+    async fn next_frame_raw(&mut self) -> Result<(Value, String)> {
+        loop {
+            if let Some((value, raw, consumed)) = mu_sexp::read_frame_raw(&self.buf)? {
+                self.buf.drain(..consumed);
+                return Ok((value, raw));
+            }
+
+            let mut tmp = [0u8; 8192];
+            let n = self.stdout.read(&mut tmp).await?;
+            if n == 0 {
+                bail!("mu server closed stdout");
+            }
+            self.buf.extend_from_slice(&tmp[..n]);
+        }
+    }
 }
 
 pub struct FindOpts {
@@ -231,6 +248,18 @@ impl MuClient {
 
     /// Run a find query and collect all envelope results.
     pub async fn find(&mut self, query: &str, opts: &FindOpts) -> Result<Vec<Envelope>> {
+        let (envelopes, _) = self.find_capturing(query, opts).await?;
+        Ok(envelopes)
+    }
+
+    /// Run a find query and collect envelopes plus individual raw sexp strings.
+    /// Each string in the returned Vec is one envelope's sexp plist (re-serialized
+    /// from the parsed Value — semantically identical to mu's output).
+    pub async fn find_capturing(
+        &mut self,
+        query: &str,
+        opts: &FindOpts,
+    ) -> Result<(Vec<Envelope>, Vec<String>)> {
         let mut cmd = format!(
             "(find :query \"{}\" :sortfield :{} :maxnum {}",
             escape_string(query),
@@ -251,6 +280,7 @@ impl MuClient {
         self.send(&cmd).await?;
 
         let mut envelopes = Vec::new();
+        let mut raw_sexps = Vec::new();
         loop {
             let value = self.reader.next_frame().await?;
             if mu_sexp::is_erase(&value) {
@@ -262,11 +292,21 @@ impl MuClient {
             if mu_sexp::is_found(&value).is_some() {
                 break;
             }
-            // This should be a :headers response
-            let mut batch = mu_sexp::parse_find_response(&value)?;
-            envelopes.append(&mut batch);
+            // Extract individual envelopes from :headers list
+            if let Some(headers) = mu_sexp::plist_get(&value, "headers") {
+                if let Some(cons) = headers.as_cons() {
+                    for pair in cons.iter() {
+                        let env_value = pair.car();
+                        raw_sexps.push(env_value.to_string());
+                        match mu_sexp::parse_envelope(env_value) {
+                            Ok(env) => envelopes.push(env),
+                            Err(e) => mu_log!("find_capturing: skip envelope: {}", e),
+                        }
+                    }
+                }
+            }
         }
-        Ok(envelopes)
+        Ok((envelopes, raw_sexps))
     }
 
     /// Run a find query and return envelopes plus the total match count.
@@ -389,6 +429,34 @@ impl MuClient {
         }
         mu_log!("index: unexpected response, skipping");
         Ok(false)
+    }
+
+    /// Send a raw S-expression command and collect all response frames
+    /// as raw strings until a terminal frame.
+    /// Skips :erase frames. Used for MuCommand proxying.
+    pub async fn send_raw(&mut self, sexp: &str) -> Result<Vec<String>> {
+        self.send(sexp).await?;
+        let mut frames = Vec::new();
+        loop {
+            let (value, raw) = self.reader.next_frame_raw().await?;
+            if mu_sexp::is_erase(&value) {
+                continue;
+            }
+            let is_terminal = mu_sexp::is_found(&value).is_some()
+                || mu_sexp::is_pong(&value)
+                || mu_sexp::is_error(&value).is_some()
+                || mu_sexp::is_update(&value)
+                || mu_sexp::plist_get_u32(&value, "remove").is_some()
+                || mu_sexp::plist_get(&value, "index").is_some()
+                || (mu_sexp::plist_get(&value, "info").is_some()
+                    && mu_sexp::plist_get(&value, "status")
+                        .and_then(|v| v.as_symbol()) == Some("complete"));
+            frames.push(raw);
+            if is_terminal {
+                break;
+            }
+        }
+        Ok(frames)
     }
 
     pub async fn quit(&mut self) -> Result<()> {
