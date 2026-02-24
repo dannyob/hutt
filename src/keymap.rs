@@ -576,7 +576,7 @@ impl KeyMapper {
     /// Return effective help data: sections of (key_string, description) pairs,
     /// plus any custom bindings not covered by the standard help sections.
     #[allow(clippy::type_complexity)]
-    pub fn help_sections(&self) -> (Vec<(&'static str, Vec<(String, &'static str)>)>, Vec<(String, String)>) {
+    pub fn help_sections(&self, account_names: &[String]) -> (Vec<(String, Vec<(String, String)>)>, Vec<(String, String)>) {
         // Each entry: (action_pattern, default_key, description)
         // action_pattern is matched against custom bindings to find overrides.
         #[allow(clippy::type_complexity)]
@@ -669,7 +669,7 @@ impl KeyMapper {
         }
 
         // Build output sections, replacing defaults with custom bindings where found
-        let mut result: Vec<(&'static str, Vec<(String, &'static str)>)> = Vec::new();
+        let mut result: Vec<(String, Vec<(String, String)>)> = Vec::new();
         for (title, entries) in sections {
             let mut items = Vec::new();
             for (action_name, default_key, desc) in *entries {
@@ -684,9 +684,23 @@ impl KeyMapper {
                         }
                     }
                 }
-                items.push((key, *desc));
+                items.push((key, desc.to_string()));
             }
-            result.push((title, items));
+            result.push((title.to_string(), items));
+        }
+
+        // Accounts section (Ctrl+1-9, gTab, gShift+Tab, gA)
+        if account_names.len() > 1 {
+            let mut items: Vec<(String, String)> = Vec::new();
+            for (i, name) in account_names.iter().enumerate() {
+                if i < 9 {
+                    items.push((format!("Ctrl+{}", i + 1), name.clone()));
+                }
+            }
+            items.push(("g Tab".to_string(), "Next account".to_string()));
+            items.push(("g Shift+Tab".to_string(), "Previous account".to_string()));
+            items.push(("g A".to_string(), "Account picker".to_string()));
+            result.push(("Accounts".to_string(), items));
         }
 
         // Collect custom bindings not shown in standard sections

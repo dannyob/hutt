@@ -2660,7 +2660,8 @@ pub async fn run(mut app: App) -> Result<()> {
                 frame.render_widget(palette, size);
             }
             if app.mode == InputMode::Help {
-                let (sections, extras) = app.keymap.help_sections();
+                let account_names: Vec<String> = app.config.accounts.iter().map(|a| a.name.clone()).collect();
+                let (sections, extras) = app.keymap.help_sections(&account_names);
                 let help = HelpOverlay {
                     scroll: app.help_scroll,
                     sections,
