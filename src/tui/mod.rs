@@ -1773,6 +1773,15 @@ impl App {
         Ok(())
     }
 
+    /// Run find_capturing to get raw sexp strings for IPC response.
+    /// Separate from the TUI's own find/load_folder so TUI state is unaffected.
+    async fn capture_envelopes(&mut self, query: &str, opts: &FindOpts) -> IpcResponse {
+        match self.mu.find_capturing(query, opts).await {
+            Ok((_envelopes, raw_sexps)) => IpcResponse::MuFrames { frames: raw_sexps },
+            Err(e) => IpcResponse::Error { message: format!("capture error: {}", e) },
+        }
+    }
+
     async fn handle_ipc_command(&mut self, cmd: IpcCommand) -> Result<IpcResponse> {
         debug_log!("handle_ipc_command: {:?}", cmd);
         match cmd {
@@ -1785,13 +1794,13 @@ impl App {
                         debug_log!("IPC Message: query={}", query);
                         self.mode = InputMode::Normal;
                         self.thread_messages.clear();
-                        self.current_folder = query;
+                        self.current_folder = query.clone();
                         match self.load_folder().await {
                             Ok(()) => debug_log!("IPC Message: loaded {} envelopes", self.envelopes.len()),
                             Err(e) => debug_log!("IPC Message: load error: {}", e),
                         }
                         self.set_status(format!("Opened message {}", id));
-                        Ok(IpcResponse::Ok)
+                        Ok(self.capture_envelopes(&query, &FindOpts::default()).await)
                     }
                     HuttUrl::Thread { id, account } => {
                         self.switch_to_account_if_needed(&account).await?;
@@ -1813,11 +1822,20 @@ impl App {
                                 Err(e) => debug_log!("IPC Thread: open_thread error: {}", e),
                             }
                             self.set_status(format!("Opened thread {}", id));
+                            // Capture thread envelopes for response
+                            let opts = FindOpts {
+                                include_related: true,
+                                descending: false,
+                                ..FindOpts::default()
+                            };
+                            Ok(self.capture_envelopes(&query, &opts).await)
                         } else {
                             debug_log!("IPC Thread: message not found");
                             self.set_status(format!("Message not found: {}", id));
+                            Ok(IpcResponse::Error {
+                                message: format!("message not found: {}", id),
+                            })
                         }
-                        Ok(IpcResponse::Ok)
                     }
                     HuttUrl::Search { query, account } => {
                         self.switch_to_account_if_needed(&account).await?;
@@ -1830,7 +1848,9 @@ impl App {
                             Err(e) => debug_log!("IPC Search: load error: {}", e),
                         }
                         self.set_status(format!("Search: {}", query));
-                        Ok(IpcResponse::Ok)
+                        // Capture uses build_query() since load_folder may expand the query
+                        let expanded = self.build_query();
+                        Ok(self.capture_envelopes(&expanded, &FindOpts::default()).await)
                     }
                     HuttUrl::Compose { to, subject, account } => {
                         self.switch_to_account_if_needed(&account).await?;
@@ -1856,7 +1876,9 @@ impl App {
                     Ok(()) => debug_log!("IPC Navigate: loaded {} envelopes", self.envelopes.len()),
                     Err(e) => debug_log!("IPC Navigate: error: {}", e),
                 }
-                Ok(IpcResponse::Ok)
+                // Capture using the expanded query (after navigate set current_folder)
+                let expanded = self.build_query();
+                Ok(self.capture_envelopes(&expanded, &FindOpts::default()).await)
             }
             IpcCommand::Quit => {
                 self.should_quit = true;
