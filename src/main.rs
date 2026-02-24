@@ -34,6 +34,8 @@ OPTIONS:
     --no-conversations          Start in single-message mode
     --background-servers        Spawn background mu servers for prefetch (default)
     --no-background-servers     Disable background mu servers
+    --vim                       Vi-style editing in search/input fields
+    --no-vim                    Emacs-style editing (default)
 
 REMOTE COMMANDS:
     open <MESSAGE-ID>           Open a message by Message-ID
@@ -229,6 +231,9 @@ async fn main() -> Result<()> {
             // Background servers
             "--no-background-servers" => config.background_servers = false,
             "--background-servers" => config.background_servers = true,
+            // Vim mode for input fields
+            "--vim" => config.vim_mode = true,
+            "--no-vim" => config.vim_mode = false,
             // Unknown flag
             arg if arg.starts_with('-') => {
                 eprintln!("Unknown option: {}", arg);

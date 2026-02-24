@@ -174,6 +174,13 @@ fn resolve_tabs(
     result
 }
 
+/// Sub-mode for vi-style editing within input fields (search bar, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VimSubMode {
+    Insert,
+    Normal,
+}
+
 pub struct App {
     // Active account (index into config.accounts)
     pub active_account: usize,
@@ -202,6 +209,7 @@ pub struct App {
     // Search
     pub search_input: String,
     pub search_textarea: TextArea<'static>,
+    pub vim_sub_mode: VimSubMode,
     pub previous_folder: Option<String>,
     pub search_history: Vec<String>,
     pub search_history_index: Option<usize>,
@@ -631,6 +639,7 @@ impl App {
             selected_set: HashSet::new(),
             search_input: String::new(),
             search_textarea: new_search_textarea(""),
+            vim_sub_mode: VimSubMode::Insert,
             previous_folder: None,
             search_history: Vec::new(),
             search_history_index: None,
@@ -1912,6 +1921,7 @@ impl App {
                 };
                 self.search_input = prefill.clone();
                 self.search_textarea = new_search_textarea(&prefill);
+                self.vim_sub_mode = VimSubMode::Insert;
                 self.search_history_index = None;
                 self.mode = InputMode::Search;
             }
@@ -2630,7 +2640,7 @@ pub async fn run(mut app: App) -> Result<()> {
 
             // Bottom bar
             if app.mode == InputMode::Search {
-                // Render search textarea with "/" prompt
+                // Render search textarea with "/" prompt and optional vim mode indicator
                 use ratatui::style::{Color, Modifier, Style};
                 let bar_area = outer[2];
                 let prompt_style = Style::default()
@@ -2640,11 +2650,38 @@ pub async fn run(mut app: App) -> Result<()> {
                 // Fill background
                 buf_set_style_area(frame.buffer_mut(), bar_area,
                     Style::default().bg(Color::DarkGray));
-                frame.buffer_mut().set_string(bar_area.x, bar_area.y, " /", prompt_style);
+
+                let vim_indicator = if app.config.vim_mode {
+                    match app.vim_sub_mode {
+                        VimSubMode::Normal => "[N] /",
+                        VimSubMode::Insert => "[I] /",
+                    }
+                } else {
+                    " /"
+                };
+                let prompt_len = vim_indicator.len() as u16;
+                frame.buffer_mut().set_string(bar_area.x, bar_area.y, vim_indicator, prompt_style);
+
+                // Update cursor style based on vim sub-mode
+                if app.config.vim_mode && app.vim_sub_mode == VimSubMode::Normal {
+                    app.search_textarea.set_cursor_style(
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::White),
+                    );
+                } else {
+                    app.search_textarea.set_cursor_style(
+                        Style::default()
+                            .fg(Color::White)
+                            .bg(Color::DarkGray)
+                            .add_modifier(Modifier::REVERSED),
+                    );
+                }
+
                 let ta_area = ratatui::layout::Rect::new(
-                    bar_area.x + 2,
+                    bar_area.x + prompt_len,
                     bar_area.y,
-                    bar_area.width.saturating_sub(2),
+                    bar_area.width.saturating_sub(prompt_len),
                     1,
                 );
                 frame.render_widget(&app.search_textarea, ta_area);
@@ -3139,60 +3176,207 @@ pub async fn run(mut app: App) -> Result<()> {
             // Search mode: route events to the TextArea, intercept control keys
             if app.mode == InputMode::Search {
                 let input: Input = key.into();
-                match input {
-                    Input { key: Key::Esc, .. } => {
-                        let action = app.keymap.handle(key, &app.mode);
-                        if let Err(e) = app.handle_action(action).await {
-                            app.set_status(format!("Error: {}", e));
-                        }
+                let vim = app.config.vim_mode;
+
+                // --- helpers reused by both modes ---
+                let cancel_search = |app: &mut App| {
+                    // Same as InputCancel
+                    use crossterm::event::{KeyCode, KeyModifiers, KeyEvent};
+                    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+                    app.keymap.handle(esc, &InputMode::Search)
+                };
+
+                let submit_search = |app: &mut App| {
+                    app.search_input = app.search_textarea.lines()[0].clone();
+                    use crossterm::event::{KeyCode, KeyModifiers, KeyEvent};
+                    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+                    app.keymap.handle(enter, &InputMode::Search)
+                };
+
+                let history_prev = |app: &mut App| {
+                    if !app.search_history.is_empty() {
+                        let idx = match app.search_history_index {
+                            None => app.search_history.len() - 1,
+                            Some(0) => 0,
+                            Some(i) => i - 1,
+                        };
+                        app.search_history_index = Some(idx);
+                        let text = app.search_history[idx].clone();
+                        app.search_input = text.clone();
+                        app.search_textarea = new_search_textarea(&text);
                     }
-                    Input { key: Key::Enter, .. } => {
-                        // Sync textarea content back to search_input, then submit
-                        app.search_input = app.search_textarea.lines()[0].clone();
-                        let action = app.keymap.handle(key, &app.mode);
-                        if let Err(e) = app.handle_action(action).await {
-                            app.set_status(format!("Error: {}", e));
-                        }
-                    }
-                    Input { key: Key::Up, .. } => {
-                        // History prev
-                        if !app.search_history.is_empty() {
-                            let idx = match app.search_history_index {
-                                None => app.search_history.len() - 1,
-                                Some(0) => 0,
-                                Some(i) => i - 1,
-                            };
-                            app.search_history_index = Some(idx);
-                            let text = app.search_history[idx].clone();
+                };
+
+                let history_next = |app: &mut App| {
+                    if let Some(idx) = app.search_history_index {
+                        if idx + 1 < app.search_history.len() {
+                            app.search_history_index = Some(idx + 1);
+                            let text = app.search_history[idx + 1].clone();
                             app.search_input = text.clone();
                             app.search_textarea = new_search_textarea(&text);
+                        } else {
+                            app.search_history_index = None;
+                            app.search_input.clear();
+                            app.search_textarea = new_search_textarea("");
                         }
                     }
-                    Input { key: Key::Down, .. } => {
-                        // History next
-                        if let Some(idx) = app.search_history_index {
-                            if idx + 1 < app.search_history.len() {
-                                app.search_history_index = Some(idx + 1);
-                                let text = app.search_history[idx + 1].clone();
-                                app.search_input = text.clone();
-                                app.search_textarea = new_search_textarea(&text);
-                            } else {
-                                app.search_history_index = None;
-                                app.search_input.clear();
-                                app.search_textarea = new_search_textarea("");
+                };
+
+                // Ctrl+C always quits, Ctrl+G always cancels search
+                if matches!(input, Input { key: Key::Char('c'), ctrl: true, .. }) {
+                    if let Err(e) = app.handle_action(Action::Quit).await {
+                        app.set_status(format!("Error: {}", e));
+                    }
+                    continue;
+                }
+                if matches!(input, Input { key: Key::Char('g'), ctrl: true, .. }) {
+                    let action = cancel_search(&mut app);
+                    if let Err(e) = app.handle_action(action).await {
+                        app.set_status(format!("Error: {}", e));
+                    }
+                    continue;
+                }
+
+                if vim && app.vim_sub_mode == VimSubMode::Normal {
+                    // ── Vim Normal mode ──
+                    match input {
+                        // Cancel search
+                        Input { key: Key::Char('q'), ctrl: false, .. } => {
+                            let action = cancel_search(&mut app);
+                            if let Err(e) = app.handle_action(action).await {
+                                app.set_status(format!("Error: {}", e));
                             }
                         }
-                    }
-                    Input { key: Key::Char('c'), ctrl: true, .. } => {
-                        // Ctrl+C quits
-                        if let Err(e) = app.handle_action(Action::Quit).await {
-                            app.set_status(format!("Error: {}", e));
+                        // Submit
+                        Input { key: Key::Enter, .. } => {
+                            let action = submit_search(&mut app);
+                            if let Err(e) = app.handle_action(action).await {
+                                app.set_status(format!("Error: {}", e));
+                            }
                         }
+                        // History
+                        Input { key: Key::Up, .. }
+                        | Input { key: Key::Char('k'), ctrl: true, .. } => history_prev(&mut app),
+                        Input { key: Key::Down, .. }
+                        | Input { key: Key::Char('j'), ctrl: true, .. } => history_next(&mut app),
+                        // Mode switches
+                        Input { key: Key::Char('i'), ctrl: false, .. } => {
+                            app.vim_sub_mode = VimSubMode::Insert;
+                        }
+                        Input { key: Key::Char('a'), ctrl: false, .. } => {
+                            app.search_textarea.move_cursor(CursorMove::Forward);
+                            app.vim_sub_mode = VimSubMode::Insert;
+                        }
+                        Input { key: Key::Char('A'), ctrl: false, .. } => {
+                            app.search_textarea.move_cursor(CursorMove::End);
+                            app.vim_sub_mode = VimSubMode::Insert;
+                        }
+                        Input { key: Key::Char('I'), ctrl: false, .. } => {
+                            app.search_textarea.move_cursor(CursorMove::Head);
+                            app.vim_sub_mode = VimSubMode::Insert;
+                        }
+                        // Motions
+                        Input { key: Key::Char('h'), ctrl: false, .. }
+                        | Input { key: Key::Left, .. } => {
+                            app.search_textarea.move_cursor(CursorMove::Back);
+                        }
+                        Input { key: Key::Char('l'), ctrl: false, .. }
+                        | Input { key: Key::Right, .. } => {
+                            app.search_textarea.move_cursor(CursorMove::Forward);
+                        }
+                        Input { key: Key::Char('w'), ctrl: false, .. } => {
+                            app.search_textarea.move_cursor(CursorMove::WordForward);
+                        }
+                        Input { key: Key::Char('b'), ctrl: false, .. } => {
+                            app.search_textarea.move_cursor(CursorMove::WordBack);
+                        }
+                        Input { key: Key::Char('e'), ctrl: false, .. } => {
+                            app.search_textarea.move_cursor(CursorMove::WordEnd);
+                        }
+                        Input { key: Key::Char('0'), ctrl: false, .. }
+                        | Input { key: Key::Home, .. } => {
+                            app.search_textarea.move_cursor(CursorMove::Head);
+                        }
+                        Input { key: Key::Char('$'), ctrl: false, .. }
+                        | Input { key: Key::End, .. } => {
+                            app.search_textarea.move_cursor(CursorMove::End);
+                        }
+                        Input { key: Key::Char('^'), ctrl: false, .. } => {
+                            app.search_textarea.move_cursor(CursorMove::Head);
+                        }
+                        // Editing
+                        Input { key: Key::Char('x'), ctrl: false, .. } => {
+                            app.search_textarea.delete_next_char();
+                            app.search_input = app.search_textarea.lines()[0].clone();
+                        }
+                        Input { key: Key::Char('X'), ctrl: false, .. } => {
+                            app.search_textarea.delete_char();
+                            app.search_input = app.search_textarea.lines()[0].clone();
+                        }
+                        Input { key: Key::Char('D'), ctrl: false, .. } => {
+                            app.search_textarea.delete_line_by_end();
+                            app.search_input = app.search_textarea.lines()[0].clone();
+                        }
+                        Input { key: Key::Char('C'), ctrl: false, .. } => {
+                            app.search_textarea.delete_line_by_end();
+                            app.search_input = app.search_textarea.lines()[0].clone();
+                            app.vim_sub_mode = VimSubMode::Insert;
+                        }
+                        Input { key: Key::Char('c'), ctrl: false, .. } => {
+                            // cc / S — clear line and enter insert
+                            app.search_textarea.move_cursor(CursorMove::Head);
+                            app.search_textarea.delete_line_by_end();
+                            app.search_input = app.search_textarea.lines()[0].clone();
+                            app.vim_sub_mode = VimSubMode::Insert;
+                        }
+                        Input { key: Key::Char('s'), ctrl: false, .. } => {
+                            // s — delete char and enter insert
+                            app.search_textarea.delete_next_char();
+                            app.search_input = app.search_textarea.lines()[0].clone();
+                            app.vim_sub_mode = VimSubMode::Insert;
+                        }
+                        Input { key: Key::Char('u'), ctrl: false, .. } => {
+                            app.search_textarea.undo();
+                            app.search_input = app.search_textarea.lines()[0].clone();
+                        }
+                        Input { key: Key::Char('r'), ctrl: true, .. } => {
+                            app.search_textarea.redo();
+                            app.search_input = app.search_textarea.lines()[0].clone();
+                        }
+                        Input { key: Key::Char('p'), ctrl: false, .. } => {
+                            app.search_textarea.paste();
+                            app.search_input = app.search_textarea.lines()[0].clone();
+                        }
+                        _ => {} // Ignore unknown keys in normal mode
                     }
-                    _ => {
-                        // Pass everything else to the textarea
-                        app.search_textarea.input(input);
-                        app.search_input = app.search_textarea.lines()[0].clone();
+                } else {
+                    // ── Emacs mode (default) or Vim Insert mode ──
+                    match input {
+                        Input { key: Key::Esc, .. } => {
+                            if vim {
+                                // Switch to vim normal mode
+                                app.vim_sub_mode = VimSubMode::Normal;
+                            } else {
+                                // Cancel search
+                                let action = cancel_search(&mut app);
+                                if let Err(e) = app.handle_action(action).await {
+                                    app.set_status(format!("Error: {}", e));
+                                }
+                            }
+                        }
+                        Input { key: Key::Enter, .. } => {
+                            let action = submit_search(&mut app);
+                            if let Err(e) = app.handle_action(action).await {
+                                app.set_status(format!("Error: {}", e));
+                            }
+                        }
+                        Input { key: Key::Up, .. } => history_prev(&mut app),
+                        Input { key: Key::Down, .. } => history_next(&mut app),
+                        _ => {
+                            // Pass everything else to the textarea
+                            app.search_textarea.input(input);
+                            app.search_input = app.search_textarea.lines()[0].clone();
+                        }
                     }
                 }
                 continue;

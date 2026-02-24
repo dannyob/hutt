@@ -24,6 +24,10 @@ pub struct Config {
     /// Default: true
     #[serde(default = "default_true")]
     pub background_servers: bool,
+    /// Use vi-style editing in the search bar and other input fields.
+    /// Default: false
+    #[serde(default)]
+    pub vim_mode: bool,
 }
 
 fn default_true() -> bool {
@@ -40,6 +44,7 @@ impl Default for Config {
             bindings: BindingsSection::default(),
             conversations: false,
             background_servers: true,
+            vim_mode: false,
         }
     }
 }
