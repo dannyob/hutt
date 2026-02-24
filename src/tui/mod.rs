@@ -238,6 +238,7 @@ pub struct App {
     pub split_queries: HashMap<String, String>,   // "#name" -> query
     pub split_excluded: HashSet<u32>,              // union of all split caches
     pub creating_split: bool,                      // true = create-flow saves as split
+    pub editing_folder: Option<String>,            // Some("#name") or Some("@name") when editing
 
     // Smart folder creation
     pub smart_create_query: String,
@@ -658,6 +659,7 @@ impl App {
             split_queries,
             split_excluded: HashSet::new(),
             creating_split: false,
+            editing_folder: None,
             smart_create_query: String::new(),
             smart_create_name: String::new(),
             smart_create_phase: 0,
@@ -1327,6 +1329,48 @@ impl App {
         } else {
             self.smart_create_count = None;
             self.smart_create_preview.clear();
+        }
+    }
+
+    async fn edit_selected_folder(&mut self) {
+        let filtered = self.filtered_folders();
+        let folder = match filtered.get(self.folder_selected) {
+            Some(f) => f.clone(),
+            None => return,
+        };
+
+        if folder.starts_with("+ ") {
+            return;
+        }
+
+        if let Some(name) = folder.strip_prefix('@') {
+            // Smart folder — edit query
+            if let Some(sf) = self.smart_folders.iter().find(|sf| sf.name == name) {
+                self.smart_create_query = sf.query.clone();
+                self.smart_create_name = sf.name.clone();
+                self.smart_create_phase = 0;
+                self.smart_create_preview.clear();
+                self.smart_create_count = None;
+                self.creating_split = false;
+                self.editing_folder = Some(folder.clone());
+                self.update_smart_create_preview().await;
+                self.mode = InputMode::SmartFolderCreate;
+            }
+        } else if let Some(name) = folder.strip_prefix('#') {
+            // Split — edit query
+            if let Some(s) = self.splits.iter().find(|s| s.name == name) {
+                self.smart_create_query = s.query.clone();
+                self.smart_create_name = s.name.clone();
+                self.smart_create_phase = 0;
+                self.smart_create_preview.clear();
+                self.smart_create_count = None;
+                self.creating_split = true;
+                self.editing_folder = Some(folder.clone());
+                self.update_smart_create_preview().await;
+                self.mode = InputMode::SmartFolderCreate;
+            }
+        } else {
+            self.set_status("Only smart folders (@) and splits (#) can be edited".to_string());
         }
     }
 
@@ -2223,32 +2267,61 @@ impl App {
                     let name = self.smart_create_name.trim().to_string();
                     let query = self.smart_create_query.trim().to_string();
                     if !name.is_empty() && !query.is_empty() {
+                        let editing = self.editing_folder.take();
                         if self.creating_split {
-                            let split = Split {
-                                name: name.clone(),
-                                query: query.clone(),
-                            };
-                            self.splits.push(split);
+                            if let Some(ref old_key) = editing {
+                                // Editing existing split — update in place
+                                let old_name = old_key.strip_prefix('#').unwrap_or(old_key);
+                                if let Some(s) = self.splits.iter_mut().find(|s| s.name == old_name) {
+                                    s.name = name.clone();
+                                    s.query = query.clone();
+                                }
+                                self.split_queries.remove(old_key);
+                                self.known_folders.retain(|f| f != old_key);
+                            } else {
+                                // Creating new split
+                                let split = Split {
+                                    name: name.clone(),
+                                    query: query.clone(),
+                                };
+                                self.splits.push(split);
+                            }
                             splits::save_splits(&self.splits, self.account_name());
                             let key = format!("#{}", name);
                             self.split_queries.insert(key.clone(), query);
-                            self.known_folders.push(key.clone());
-                            self.known_folders.sort();
+                            if !self.known_folders.contains(&key) {
+                                self.known_folders.push(key.clone());
+                                self.known_folders.sort();
+                            }
                             self.rebuild_tabs();
                             self.refresh_split_caches().await;
                             self.mode = InputMode::Normal;
                             self.navigate_folder(&key).await?;
                         } else {
-                            let sf = SmartFolder {
-                                name: name.clone(),
-                                query: query.clone(),
-                            };
-                            self.smart_folders.push(sf);
+                            if let Some(ref old_key) = editing {
+                                // Editing existing smart folder — update in place
+                                let old_name = old_key.strip_prefix('@').unwrap_or(old_key);
+                                if let Some(sf) = self.smart_folders.iter_mut().find(|sf| sf.name == old_name) {
+                                    sf.name = name.clone();
+                                    sf.query = query.clone();
+                                }
+                                self.smart_folder_queries.remove(old_key);
+                                self.known_folders.retain(|f| f != old_key);
+                            } else {
+                                // Creating new smart folder
+                                let sf = SmartFolder {
+                                    name: name.clone(),
+                                    query: query.clone(),
+                                };
+                                self.smart_folders.push(sf);
+                            }
                             smart_folders::save_smart_folders(&self.smart_folders, self.account_name());
                             let key = format!("@{}", name);
                             self.smart_folder_queries.insert(key.clone(), query);
-                            self.known_folders.push(key.clone());
-                            self.known_folders.sort();
+                            if !self.known_folders.contains(&key) {
+                                self.known_folders.push(key.clone());
+                                self.known_folders.sort();
+                            }
                             self.rebuild_tabs();
                             self.mode = InputMode::Normal;
                             self.navigate_folder(&key).await?;
@@ -2311,6 +2384,7 @@ impl App {
                 }
                 InputMode::SmartFolderCreate => {
                     self.creating_split = false;
+                    self.editing_folder = None;
                     self.mode = InputMode::FolderPicker;
                 }
                 InputMode::SmartFolderName => {
@@ -2725,7 +2799,12 @@ pub async fn run(mut app: App) -> Result<()> {
                     phase: app.smart_create_phase,
                     preview: &app.smart_create_preview,
                     count: app.smart_create_count,
-                    title: if app.creating_split { "New Split" } else { "New Smart Folder" },
+                    title: match (&app.editing_folder, app.creating_split) {
+                        (Some(_), true) => "Edit Split",
+                        (Some(_), false) => "Edit Smart Folder",
+                        (None, true) => "New Split",
+                        (None, false) => "New Smart Folder",
+                    },
                 };
                 frame.render_widget(popup, size);
             }
@@ -3401,6 +3480,13 @@ pub async fn run(mut app: App) -> Result<()> {
                         && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
                     {
                         app.delete_selected_folder().await;
+                        continue;
+                    }
+                    // Ctrl-E edits the selected smart folder / split query
+                    if key.code == crossterm::event::KeyCode::Char('e')
+                        && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                    {
+                        app.edit_selected_folder().await;
                         continue;
                     }
                 }

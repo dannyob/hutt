@@ -214,7 +214,7 @@ impl<'a> BottomBar<'a> {
                 "j/k:nav o:expand e:archive r:reply q:back ?:help"
             }
             InputMode::FolderPicker => {
-                "j/k:nav Enter:select C-d:delete Esc:cancel | type to filter"
+                "j/k:nav Enter:select C-e:edit C-d:delete Esc:cancel | filter"
             }
             InputMode::CommandPalette => "j/k:nav Enter:select Esc:cancel | type to filter",
             InputMode::Help => "j/k:scroll ?/q/Esc:close",
