@@ -1540,13 +1540,28 @@ impl App {
 
     // ── IPC command handling ──────────────────────────────────────────
 
+    /// If the IPC command specifies an account, switch to it first.
+    async fn switch_to_account_if_needed(&mut self, account: &Option<String>) -> Result<()> {
+        if let Some(name) = account {
+            if let Some(idx) = self.config.accounts.iter().position(|a| a.name == *name) {
+                if idx != self.active_account {
+                    self.switch_account(idx).await?;
+                }
+            } else {
+                self.set_status(format!("Unknown account: {}", name));
+            }
+        }
+        Ok(())
+    }
+
     async fn handle_ipc_command(&mut self, cmd: IpcCommand) -> Result<()> {
         debug_log!("handle_ipc_command: {:?}", cmd);
         match cmd {
             IpcCommand::Open(url_serde) => {
                 let url: HuttUrl = url_serde.into();
                 match url {
-                    HuttUrl::Message(id) => {
+                    HuttUrl::Message { id, account } => {
+                        self.switch_to_account_if_needed(&account).await?;
                         let query = format!("msgid:{}", id);
                         debug_log!("IPC Message: query={}", query);
                         self.mode = InputMode::Normal;
@@ -1558,7 +1573,8 @@ impl App {
                         }
                         self.set_status(format!("Opened message {}", id));
                     }
-                    HuttUrl::Thread(id) => {
+                    HuttUrl::Thread { id, account } => {
+                        self.switch_to_account_if_needed(&account).await?;
                         let query = format!("msgid:{}", id);
                         debug_log!("IPC Thread: query={}", query);
                         self.mode = InputMode::Normal;
@@ -1582,7 +1598,8 @@ impl App {
                             self.set_status(format!("Message not found: {}", id));
                         }
                     }
-                    HuttUrl::Search(query) => {
+                    HuttUrl::Search { query, account } => {
+                        self.switch_to_account_if_needed(&account).await?;
                         debug_log!("IPC Search: query={}", query);
                         self.mode = InputMode::Normal;
                         self.thread_messages.clear();
@@ -1593,7 +1610,8 @@ impl App {
                         }
                         self.set_status(format!("Search: {}", query));
                     }
-                    HuttUrl::Compose { to, subject } => {
+                    HuttUrl::Compose { to, subject, account } => {
+                        self.switch_to_account_if_needed(&account).await?;
                         let mut ctx = compose::ComposeContext::new_message();
                         ctx.to = vec![crate::envelope::Address {
                             name: None,
@@ -1606,7 +1624,8 @@ impl App {
                     }
                 }
             }
-            IpcCommand::Navigate { folder } => {
+            IpcCommand::Navigate { folder, account } => {
+                self.switch_to_account_if_needed(&account).await?;
                 debug_log!("IPC Navigate: folder={}", folder);
                 self.mode = InputMode::Normal;
                 self.thread_messages.clear();

@@ -41,14 +41,27 @@ REMOTE COMMANDS:
     search <QUERY>              Run a search query
     compose [--to=ADDR] [--subject=TEXT]  Open compose window
     navigate <FOLDER>           Switch to a folder
+    open-url <URI>              Open any URI (mid:, message:, mailto:, hutt:)
     quit                        Quit the running instance
+
+    All remote commands accept --account=NAME to target a specific account.
+
+URI SCHEMES:
+    mid:<message-id>                         Open message (RFC 2392)
+    mid:<message-id>?view=thread             Open thread
+    message:<message-id>                     Open message (Apple Mail)
+    mailto:addr?subject=text                 Compose (RFC 6068)
+    hutt:search?q=<query>[&account=<name>]   Search
+    hutt:navigate?folder=<path>[&account=<name>]  Navigate
 
 EXAMPLES:
     hutt                        Open default account inbox
     hutt /Sent                  Open the Sent folder
     hutt -a work /Drafts        Open Drafts on the 'work' account
     hutt r search from:alice    Search in the running instance
+    hutt r search --account=work from:alice
     hutt r compose --to=bob@example.com --subject=\"Hello\"
+    hutt r open-url 'mid:abc@example.com?view=thread'
 
 ENVIRONMENT:
     HUTT_LOG=<path>             Debug log file (same as --log)
@@ -69,8 +82,32 @@ COMMANDS:
     search <QUERY>              Run a search query
     compose [--to=ADDR] [--subject=TEXT]  Open compose window
     navigate <FOLDER>           Switch to a folder
-    quit                        Quit the running instance"
+    open-url <URI>              Open any URI (mid:, message:, mailto:, hutt:)
+    quit                        Quit the running instance
+
+    All commands accept --account=NAME / -a NAME to target a specific account."
     );
+}
+
+/// Parse --account=name or --account name from args, returning the value and remaining args.
+fn extract_account(args: &[String]) -> (Option<String>, Vec<String>) {
+    let mut account = None;
+    let mut rest = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if let Some(v) = args[i].strip_prefix("--account=") {
+            account = Some(v.to_string());
+        } else if args[i] == "--account" || args[i] == "-a" {
+            i += 1;
+            if i < args.len() {
+                account = Some(args[i].clone());
+            }
+        } else {
+            rest.push(args[i].clone());
+        }
+        i += 1;
+    }
+    (account, rest)
 }
 
 async fn run_remote(args: &[String]) -> Result<()> {
@@ -80,38 +117,57 @@ async fn run_remote(args: &[String]) -> Result<()> {
     }
 
     let cmd = match args[0].as_str() {
+        // Open any URI (mid:, message:, mailto:, hutt:)
+        "open-url" | "url" => {
+            let url = args.get(1).ok_or_else(|| anyhow::anyhow!("open-url requires a URI"))?;
+            // Try navigate URLs first (they're not HuttUrls)
+            if let Some((folder, account)) = links::parse_navigate_url(url) {
+                links::IpcCommand::Navigate { folder, account }
+            } else if let Some(parsed) = links::parse_url(url) {
+                links::IpcCommand::Open(parsed.into())
+            } else {
+                bail!("unrecognized URI: {}", url);
+            }
+        }
         "open" => {
-            let id = args.get(1).ok_or_else(|| anyhow::anyhow!("open requires a message-id"))?;
-            links::IpcCommand::Open(links::HuttUrlSerde::Message { id: id.clone() })
+            let (account, rest) = extract_account(&args[1..]);
+            let id = rest.first().ok_or_else(|| anyhow::anyhow!("open requires a message-id"))?;
+            links::IpcCommand::Open(links::HuttUrlSerde::Message { id: id.clone(), account })
         }
         "thread" => {
-            let id = args.get(1).ok_or_else(|| anyhow::anyhow!("thread requires a message-id"))?;
-            links::IpcCommand::Open(links::HuttUrlSerde::Thread { id: id.clone() })
+            let (account, rest) = extract_account(&args[1..]);
+            let id = rest.first().ok_or_else(|| anyhow::anyhow!("thread requires a message-id"))?;
+            links::IpcCommand::Open(links::HuttUrlSerde::Thread { id: id.clone(), account })
         }
         "search" => {
-            let query = args[1..].join(" ");
+            let (account, rest) = extract_account(&args[1..]);
+            let query = rest.join(" ");
             if query.is_empty() {
                 bail!("search requires a query");
             }
-            links::IpcCommand::Open(links::HuttUrlSerde::Search { query })
+            links::IpcCommand::Open(links::HuttUrlSerde::Search { query, account })
         }
         "compose" => {
             let mut to = String::new();
             let mut subject = String::new();
+            let mut account = None;
             for arg in &args[1..] {
                 if let Some(v) = arg.strip_prefix("--to=") {
                     to = v.to_string();
                 } else if let Some(v) = arg.strip_prefix("--subject=") {
                     subject = v.to_string();
+                } else if let Some(v) = arg.strip_prefix("--account=") {
+                    account = Some(v.to_string());
                 } else {
                     bail!("compose: unknown argument '{}'", arg);
                 }
             }
-            links::IpcCommand::Open(links::HuttUrlSerde::Compose { to, subject })
+            links::IpcCommand::Open(links::HuttUrlSerde::Compose { to, subject, account })
         }
         "navigate" | "nav" => {
-            let folder = args.get(1).ok_or_else(|| anyhow::anyhow!("navigate requires a folder"))?;
-            links::IpcCommand::Navigate { folder: folder.clone() }
+            let (account, rest) = extract_account(&args[1..]);
+            let folder = rest.first().ok_or_else(|| anyhow::anyhow!("navigate requires a folder"))?;
+            links::IpcCommand::Navigate { folder: folder.clone(), account }
         }
         "quit" => links::IpcCommand::Quit,
         "-h" | "--help" | "help" => {

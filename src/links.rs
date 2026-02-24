@@ -1,4 +1,25 @@
-//! Phase 3: Linkability — hutt:// URLs, clipboard, browser open, IPC socket.
+//! URI schemes and IPC for hutt.
+//!
+//! ## URI Design
+//!
+//! hutt uses standard URI schemes where they exist:
+//!
+//! - `mid:<message-id>` — open a message (RFC 2392)
+//! - `mid:<message-id>?view=thread` — open a message's thread
+//! - `message:<message-id>` — open a message (IANA provisional, Apple Mail)
+//! - `mailto:addr?subject=text` — compose (RFC 6068)
+//!
+//! For app-specific operations with no standard scheme:
+//!
+//! - `hutt:search?q=<query>[&account=<name>]` — run a search
+//! - `hutt:navigate?folder=<path>[&account=<name>]` — switch to a folder
+//!
+//! The `account` parameter is optional; when omitted, the active account
+//! is used. For `mid:` URLs, hutt searches all accounts since Message-IDs
+//! are globally unique (RFC 2822).
+//!
+//! Legacy `hutt://` URLs (with double slash) are still accepted for
+//! backwards compatibility.
 
 use anyhow::{bail, Context, Result};
 use arboard::Clipboard;
@@ -8,79 +29,187 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
 // ---------------------------------------------------------------------------
-// hutt:// URL scheme
+// URI scheme types
 // ---------------------------------------------------------------------------
 
-/// Parsed representation of a `hutt://` URL.
+/// Parsed representation of a hutt-understood URI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HuttUrl {
-    Message(String),
-    Thread(String),
-    Search(String),
-    Compose { to: String, subject: String },
+    /// Open a message by Message-ID.
+    Message { id: String, account: Option<String> },
+    /// Open a thread by Message-ID.
+    Thread { id: String, account: Option<String> },
+    /// Run a search query.
+    Search { query: String, account: Option<String> },
+    /// Open a compose window.
+    Compose { to: String, subject: String, account: Option<String> },
 }
 
-/// Format a `hutt://message/<message-id>` URL.
+// ---------------------------------------------------------------------------
+// URI formatting (output — clipboard, display)
+// ---------------------------------------------------------------------------
+
+/// Format a `mid:<message-id>` URI (RFC 2392).
 pub fn format_message_url(message_id: &str) -> String {
-    format!("hutt://message/{}", message_id)
+    format!("mid:{}", message_id)
 }
 
-/// Format a `hutt://thread/<message-id>` URL.
+/// Format a `mid:<message-id>?view=thread` URI.
 pub fn format_thread_url(message_id: &str) -> String {
-    format!("hutt://thread/{}", message_id)
+    format!("mid:{}?view=thread", message_id)
 }
 
-/// Format a `hutt://search/<url-encoded-query>` URL.
-pub fn format_search_url(query: &str) -> String {
-    let encoded = url_encode(query);
-    format!("hutt://search/{}", encoded)
-}
-
-/// Format a `hutt://compose?to=<to>&subject=<subject>` URL.
+/// Format a `mailto:` URI (RFC 6068).
 #[allow(dead_code)]
 pub fn format_compose_url(to: &str, subject: &str) -> String {
-    format!(
-        "hutt://compose?to={}&subject={}",
-        url_encode(to),
-        url_encode(subject),
-    )
+    if subject.is_empty() {
+        format!("mailto:{}", to)
+    } else {
+        format!("mailto:{}?subject={}", to, url_encode(subject))
+    }
 }
 
-/// Parse a `hutt://` URL into a `HuttUrl`, returning `None` if it's not valid.
+/// Format a `hutt:search?q=<query>` URI.
 #[allow(dead_code)]
-pub fn parse_hutt_url(url: &str) -> Option<HuttUrl> {
-    let rest = url.strip_prefix("hutt://")?;
+pub fn format_search_url(query: &str) -> String {
+    format!("hutt:search?q={}", url_encode(query))
+}
 
-    if let Some(id) = rest.strip_prefix("message/") {
+// ---------------------------------------------------------------------------
+// URI parsing (input — IPC, URL handler, clipboard)
+// ---------------------------------------------------------------------------
+
+/// Parse a URI into a `HuttUrl`.
+///
+/// Accepts:
+/// - `mid:<message-id>[?view=thread][&account=name]`
+/// - `message:<message-id>` or `message://<message-id>`
+/// - `mailto:addr[?subject=text&account=name]`
+/// - `hutt:search?q=query[&account=name]`
+/// - `hutt:navigate?folder=path[&account=name]`
+/// - Legacy: `hutt://message/id`, `hutt://thread/id`, `hutt://search/q`, `hutt://compose?...`
+pub fn parse_url(url: &str) -> Option<HuttUrl> {
+    // mid:<message-id>[?view=thread]
+    if let Some(rest) = url.strip_prefix("mid:") {
+        let (id, qs) = split_query(rest);
         if id.is_empty() {
             return None;
         }
-        return Some(HuttUrl::Message(id.to_string()));
+        let params = parse_query_string(qs);
+        let account = params.get("account").cloned();
+        if params.get("view").map(|v| v.as_str()) == Some("thread") {
+            return Some(HuttUrl::Thread { id: id.to_string(), account });
+        }
+        return Some(HuttUrl::Message { id: id.to_string(), account });
     }
 
-    if let Some(id) = rest.strip_prefix("thread/") {
+    // message:<message-id> or message://<message-id> (Apple Mail)
+    if let Some(rest) = url.strip_prefix("message:") {
+        let rest = rest.strip_prefix("//").unwrap_or(rest);
+        // Apple Mail percent-encodes angle brackets: %3C...%3E
+        let id = url_decode(rest);
+        let id = id.strip_prefix('<').unwrap_or(&id);
+        let id = id.strip_suffix('>').unwrap_or(id);
         if id.is_empty() {
             return None;
         }
-        return Some(HuttUrl::Thread(id.to_string()));
+        return Some(HuttUrl::Message { id: id.to_string(), account: None });
     }
 
-    if let Some(encoded) = rest.strip_prefix("search/") {
-        let query = url_decode(encoded);
-        if query.is_empty() {
-            return None;
-        }
-        return Some(HuttUrl::Search(query));
-    }
-
-    if let Some(query_string) = rest.strip_prefix("compose?") {
-        let params = parse_query_string(query_string);
-        let to = params.get("to").cloned().unwrap_or_default();
+    // mailto:addr[?subject=text]
+    if let Some(rest) = url.strip_prefix("mailto:") {
+        let (addr, qs) = split_query(rest);
+        let params = parse_query_string(qs);
+        let to = url_decode(addr);
         let subject = params.get("subject").cloned().unwrap_or_default();
-        return Some(HuttUrl::Compose { to, subject });
+        let account = params.get("account").cloned();
+        return Some(HuttUrl::Compose { to, subject, account });
+    }
+
+    // hutt:search?q=... and hutt:navigate?folder=...
+    if let Some(rest) = url.strip_prefix("hutt:") {
+        // Strip optional // for backwards compat
+        let rest = rest.strip_prefix("//").unwrap_or(rest);
+        return parse_hutt_path(rest);
     }
 
     None
+}
+
+/// Parse the path+query portion of a hutt: URI.
+/// Handles both new format (search?q=...) and legacy (message/id, thread/id, etc).
+fn parse_hutt_path(rest: &str) -> Option<HuttUrl> {
+    let (path, qs) = split_query(rest);
+    let params = parse_query_string(qs);
+    let account = params.get("account").cloned();
+
+    // New format: hutt:search?q=...
+    if path == "search" {
+        let query = params.get("q").cloned().unwrap_or_default();
+        if query.is_empty() {
+            return None;
+        }
+        return Some(HuttUrl::Search { query, account });
+    }
+
+    // New format: hutt:navigate?folder=...
+    if path == "navigate" {
+        // Navigate is handled as a special IPC command, not a HuttUrl.
+        // But we still parse it to get the folder for the IPC layer.
+        return None;
+    }
+
+    // Legacy: hutt://message/<id>
+    if let Some(id) = path.strip_prefix("message/") {
+        if id.is_empty() { return None; }
+        return Some(HuttUrl::Message { id: id.to_string(), account });
+    }
+
+    // Legacy: hutt://thread/<id>
+    if let Some(id) = path.strip_prefix("thread/") {
+        if id.is_empty() { return None; }
+        return Some(HuttUrl::Thread { id: id.to_string(), account });
+    }
+
+    // Legacy: hutt://search/<encoded-query>
+    if let Some(encoded) = path.strip_prefix("search/") {
+        let query = url_decode(encoded);
+        if query.is_empty() { return None; }
+        return Some(HuttUrl::Search { query, account });
+    }
+
+    // Legacy: hutt://compose?to=...&subject=...
+    if path == "compose" {
+        let to = params.get("to").cloned().unwrap_or_default();
+        let subject = params.get("subject").cloned().unwrap_or_default();
+        return Some(HuttUrl::Compose { to, subject, account });
+    }
+
+    None
+}
+
+/// Parse a `hutt:navigate?folder=...&account=...` URI, returning (folder, account).
+/// Separate from parse_url because Navigate is an IPC command, not a HuttUrl.
+pub fn parse_navigate_url(url: &str) -> Option<(String, Option<String>)> {
+    let rest = url.strip_prefix("hutt:")?;
+    let rest = rest.strip_prefix("//").unwrap_or(rest);
+    let (path, qs) = split_query(rest);
+    if path != "navigate" {
+        return None;
+    }
+    let params = parse_query_string(qs);
+    let folder = params.get("folder").cloned()?;
+    if folder.is_empty() {
+        return None;
+    }
+    let account = params.get("account").cloned();
+    Some((folder, account))
+}
+
+/// Backwards-compatible wrapper. Calls parse_url.
+#[allow(dead_code)]
+pub fn parse_hutt_url(url: &str) -> Option<HuttUrl> {
+    parse_url(url)
 }
 
 // ---------------------------------------------------------------------------
@@ -142,28 +271,48 @@ fn open_path(target: &str) -> Result<()> {
 #[serde(tag = "type")]
 pub enum IpcCommand {
     Open(HuttUrlSerde),
-    Navigate { folder: String },
+    Navigate {
+        folder: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+    },
     Quit,
 }
 
-/// Serde-friendly mirror of `HuttUrl` (the enum above uses untagged variants
-/// which are tricky with serde, so we keep a dedicated transport type).
+/// Serde-friendly mirror of `HuttUrl`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum HuttUrlSerde {
-    Message { id: String },
-    Thread { id: String },
-    Search { query: String },
-    Compose { to: String, subject: String },
+    Message {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+    },
+    Thread {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+    },
+    Search {
+        query: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+    },
+    Compose {
+        to: String,
+        subject: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+    },
 }
 
 impl From<HuttUrl> for HuttUrlSerde {
     fn from(u: HuttUrl) -> Self {
         match u {
-            HuttUrl::Message(id) => HuttUrlSerde::Message { id },
-            HuttUrl::Thread(id) => HuttUrlSerde::Thread { id },
-            HuttUrl::Search(q) => HuttUrlSerde::Search { query: q },
-            HuttUrl::Compose { to, subject } => HuttUrlSerde::Compose { to, subject },
+            HuttUrl::Message { id, account } => HuttUrlSerde::Message { id, account },
+            HuttUrl::Thread { id, account } => HuttUrlSerde::Thread { id, account },
+            HuttUrl::Search { query, account } => HuttUrlSerde::Search { query, account },
+            HuttUrl::Compose { to, subject, account } => HuttUrlSerde::Compose { to, subject, account },
         }
     }
 }
@@ -171,10 +320,10 @@ impl From<HuttUrl> for HuttUrlSerde {
 impl From<HuttUrlSerde> for HuttUrl {
     fn from(s: HuttUrlSerde) -> Self {
         match s {
-            HuttUrlSerde::Message { id } => HuttUrl::Message(id),
-            HuttUrlSerde::Thread { id } => HuttUrl::Thread(id),
-            HuttUrlSerde::Search { query } => HuttUrl::Search(query),
-            HuttUrlSerde::Compose { to, subject } => HuttUrl::Compose { to, subject },
+            HuttUrlSerde::Message { id, account } => HuttUrl::Message { id, account },
+            HuttUrlSerde::Thread { id, account } => HuttUrl::Thread { id, account },
+            HuttUrlSerde::Search { query, account } => HuttUrl::Search { query, account },
+            HuttUrlSerde::Compose { to, subject, account } => HuttUrl::Compose { to, subject, account },
         }
     }
 }
@@ -200,7 +349,6 @@ impl IpcListener {
     /// if one already exists.
     pub fn bind() -> Result<Self> {
         let path = socket_path();
-        // Remove stale socket if present.
         if path.exists() {
             std::fs::remove_file(&path)
                 .with_context(|| format!("removing stale socket {}", path.display()))?;
@@ -238,7 +386,6 @@ impl Drop for IpcListener {
 }
 
 /// Client side: connect to the running hutt instance and send a command.
-#[allow(dead_code)]
 pub async fn send_ipc_command(cmd: &IpcCommand) -> Result<()> {
     let path = socket_path();
     if !path.exists() {
@@ -266,8 +413,7 @@ pub async fn send_ipc_command(cmd: &IpcCommand) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Install a minimal .app bundle in ~/Applications that registers the
-/// `hutt://` URL scheme on macOS.  The app is a shell script that forwards
-/// the URL to the running hutt instance via the IPC socket.
+/// `mid:`, `message:`, and `hutt:` URL schemes on macOS.
 #[allow(dead_code)]
 pub fn install_macos_handler() -> Result<()> {
     let home = std::env::var("HOME").context("HOME not set")?;
@@ -300,6 +446,8 @@ pub fn install_macos_handler() -> Result<()> {
             <key>CFBundleURLSchemes</key>
             <array>
                 <string>hutt</string>
+                <string>mid</string>
+                <string>message</string>
             </array>
         </dict>
     </array>
@@ -311,65 +459,29 @@ pub fn install_macos_handler() -> Result<()> {
         .with_context(|| format!("writing {}", plist_path.display()))?;
 
     // --- Executable shell script ---
-    // The script determines the socket path using the same logic as Rust,
-    // constructs a JSON IPC command, and sends it via socat or a simple
-    // /dev/unix pipe.
+    // Uses `hutt remote` to forward URLs to the running instance.
     let script = r#"#!/bin/bash
-# Hutt URL handler — forwards hutt:// URLs to the running instance.
+# Hutt URL handler — forwards mid:, message:, and hutt: URLs to the running instance.
 URL="$1"
 if [ -z "$URL" ]; then
     exit 0
 fi
 
-SOCK="${XDG_RUNTIME_DIR:-/tmp/hutt-$(id -u).sock}/hutt.sock"
-# Fallback: if XDG_RUNTIME_DIR was not set, the socket is at /tmp/hutt-<uid>.sock
-if [ ! -S "$SOCK" ]; then
-    SOCK="/tmp/hutt-$(id -u).sock"
-fi
-if [ -n "$XDG_RUNTIME_DIR" ] && [ -S "$XDG_RUNTIME_DIR/hutt.sock" ]; then
-    SOCK="$XDG_RUNTIME_DIR/hutt.sock"
+# Find the hutt binary
+HUTT="${HUTT_BIN:-hutt}"
+if ! command -v "$HUTT" &>/dev/null; then
+    HUTT="$HOME/.local/bin/hutt"
 fi
 
-# Escape the URL for JSON (minimal: backslash and double-quote)
-ESCAPED=$(printf '%s' "$URL" | sed 's/\\/\\\\/g; s/"/\\"/g')
-
-JSON=$(cat <<EOF
-{"type":"Open","kind":"Message","id":"$ESCAPED"}
-EOF
-)
-
-# Prefer socat if available, otherwise try python3
-if command -v socat &>/dev/null; then
-    printf '%s' "$JSON" | socat - UNIX-CONNECT:"$SOCK"
-elif command -v python3 &>/dev/null; then
-    python3 -c "
-import socket, sys, json
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect('$SOCK')
-# Re-parse URL and build proper command
-url = '$URL'
-if url.startswith('hutt://message/'):
-    mid = url[len('hutt://message/'):]
-    cmd = json.dumps({'type': 'Open', 'kind': 'Message', 'id': mid})
-elif url.startswith('hutt://thread/'):
-    mid = url[len('hutt://thread/'):]
-    cmd = json.dumps({'type': 'Open', 'kind': 'Thread', 'id': mid})
-elif url.startswith('hutt://search/'):
-    q = url[len('hutt://search/'):]
-    cmd = json.dumps({'type': 'Open', 'kind': 'Search', 'query': q})
-else:
-    cmd = json.dumps({'type': 'Open', 'kind': 'Message', 'id': url})
-s.sendall(cmd.encode())
-s.close()
-"
-fi
+# Use `hutt remote` to dispatch the URL.
+# The remote subcommand's 'open' accepts any URI format.
+"$HUTT" r open-url "$URL"
 "#.to_string();
 
     let script_path = macos_dir.join("hutt-open");
     std::fs::write(&script_path, script)
         .with_context(|| format!("writing {}", script_path.display()))?;
 
-    // Make the script executable
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -378,7 +490,6 @@ fi
             .with_context(|| format!("chmod {}", script_path.display()))?;
     }
 
-    // Tell Launch Services to re-register the app
     let _ = std::process::Command::new("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
         .args(["-f", app_dir.to_str().unwrap_or("")])
         .output();
@@ -387,7 +498,7 @@ fi
 }
 
 // ---------------------------------------------------------------------------
-// Helpers: minimal percent-encoding / decoding (no extra crate needed)
+// Helpers: minimal percent-encoding / decoding
 // ---------------------------------------------------------------------------
 
 fn url_encode(s: &str) -> String {
@@ -407,7 +518,6 @@ fn url_encode(s: &str) -> String {
     out
 }
 
-#[allow(dead_code)]
 fn url_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(s.len());
     let bytes = s.as_bytes();
@@ -434,7 +544,6 @@ fn hex_digit(n: u8) -> char {
     }
 }
 
-#[allow(dead_code)]
 fn from_hex(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
@@ -444,9 +553,19 @@ fn from_hex(b: u8) -> Option<u8> {
     }
 }
 
-#[allow(dead_code)]
+/// Split a URI string into path and query components at the first `?`.
+fn split_query(s: &str) -> (&str, &str) {
+    match s.split_once('?') {
+        Some((path, qs)) => (path, qs),
+        None => (s, ""),
+    }
+}
+
 fn parse_query_string(qs: &str) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
+    if qs.is_empty() {
+        return map;
+    }
     for pair in qs.split('&') {
         if let Some((k, v)) = pair.split_once('=') {
             map.insert(url_decode(k), url_decode(v));
@@ -463,85 +582,194 @@ fn parse_query_string(qs: &str) -> std::collections::HashMap<String, String> {
 mod tests {
     use super::*;
 
+    // ── mid: URLs ──────────────────────────────────────────────
+
     #[test]
-    fn test_format_message_url() {
+    fn parse_mid_message() {
         assert_eq!(
-            format_message_url("abc123@example.com"),
-            "hutt://message/abc123@example.com"
+            parse_url("mid:abc123@example.com"),
+            Some(HuttUrl::Message { id: "abc123@example.com".into(), account: None })
         );
     }
 
     #[test]
-    fn test_format_thread_url() {
+    fn parse_mid_thread() {
         assert_eq!(
-            format_thread_url("abc123@example.com"),
-            "hutt://thread/abc123@example.com"
+            parse_url("mid:abc123@example.com?view=thread"),
+            Some(HuttUrl::Thread { id: "abc123@example.com".into(), account: None })
         );
     }
 
     #[test]
-    fn test_format_search_url() {
+    fn parse_mid_with_account() {
         assert_eq!(
-            format_search_url("from:alice subject:hello world"),
-            "hutt://search/from%3Aalice%20subject%3Ahello%20world"
+            parse_url("mid:abc123@example.com?account=work"),
+            Some(HuttUrl::Message { id: "abc123@example.com".into(), account: Some("work".into()) })
+        );
+        assert_eq!(
+            parse_url("mid:abc123@example.com?view=thread&account=work"),
+            Some(HuttUrl::Thread { id: "abc123@example.com".into(), account: Some("work".into()) })
         );
     }
 
     #[test]
-    fn test_format_compose_url() {
-        let url = format_compose_url("bob@example.com", "Hello World");
+    fn parse_mid_empty() {
+        assert_eq!(parse_url("mid:"), None);
+    }
+
+    // ── message: URLs (Apple Mail) ─────────────────────────────
+
+    #[test]
+    fn parse_message_url() {
         assert_eq!(
-            url,
-            "hutt://compose?to=bob%40example.com&subject=Hello%20World"
+            parse_url("message:abc@example.com"),
+            Some(HuttUrl::Message { id: "abc@example.com".into(), account: None })
         );
     }
 
     #[test]
-    fn test_parse_message_url() {
+    fn parse_message_url_with_slashes() {
         assert_eq!(
-            parse_hutt_url("hutt://message/abc123@example.com"),
-            Some(HuttUrl::Message("abc123@example.com".to_string()))
+            parse_url("message://abc@example.com"),
+            Some(HuttUrl::Message { id: "abc@example.com".into(), account: None })
         );
     }
 
     #[test]
-    fn test_parse_thread_url() {
+    fn parse_message_url_with_angle_brackets() {
+        // Apple Mail uses %3C...%3E for angle brackets
         assert_eq!(
-            parse_hutt_url("hutt://thread/abc123@example.com"),
-            Some(HuttUrl::Thread("abc123@example.com".to_string()))
+            parse_url("message://%3Cabc@example.com%3E"),
+            Some(HuttUrl::Message { id: "abc@example.com".into(), account: None })
         );
     }
 
-    #[test]
-    fn test_parse_search_url() {
-        assert_eq!(
-            parse_hutt_url("hutt://search/from%3Aalice%20subject%3Ahello%20world"),
-            Some(HuttUrl::Search(
-                "from:alice subject:hello world".to_string()
-            ))
-        );
-    }
+    // ── mailto: URLs ───────────────────────────────────────────
 
     #[test]
-    fn test_parse_compose_url() {
+    fn parse_mailto() {
         assert_eq!(
-            parse_hutt_url("hutt://compose?to=bob%40example.com&subject=Hello%20World"),
+            parse_url("mailto:bob@example.com?subject=Hello%20World"),
             Some(HuttUrl::Compose {
-                to: "bob@example.com".to_string(),
-                subject: "Hello World".to_string(),
+                to: "bob@example.com".into(),
+                subject: "Hello World".into(),
+                account: None,
             })
         );
     }
 
     #[test]
-    fn test_parse_invalid_url() {
-        assert_eq!(parse_hutt_url("https://example.com"), None);
-        assert_eq!(parse_hutt_url("hutt://message/"), None);
-        assert_eq!(parse_hutt_url("hutt://unknown/foo"), None);
+    fn parse_mailto_bare() {
+        assert_eq!(
+            parse_url("mailto:bob@example.com"),
+            Some(HuttUrl::Compose {
+                to: "bob@example.com".into(),
+                subject: String::new(),
+                account: None,
+            })
+        );
+    }
+
+    // ── hutt: URLs (new format) ────────────────────────────────
+
+    #[test]
+    fn parse_hutt_search() {
+        assert_eq!(
+            parse_url("hutt:search?q=from%3Aalice"),
+            Some(HuttUrl::Search { query: "from:alice".into(), account: None })
+        );
     }
 
     #[test]
-    fn test_url_encode_decode_roundtrip() {
+    fn parse_hutt_search_with_account() {
+        assert_eq!(
+            parse_url("hutt:search?q=from%3Aalice&account=work"),
+            Some(HuttUrl::Search { query: "from:alice".into(), account: Some("work".into()) })
+        );
+    }
+
+    #[test]
+    fn parse_hutt_navigate() {
+        assert_eq!(
+            parse_navigate_url("hutt:navigate?folder=%2FInbox"),
+            Some(("/Inbox".into(), None))
+        );
+        assert_eq!(
+            parse_navigate_url("hutt:navigate?folder=%2FSent&account=work"),
+            Some(("/Sent".into(), Some("work".into())))
+        );
+    }
+
+    // ── Legacy hutt:// URLs ────────────────────────────────────
+
+    #[test]
+    fn parse_legacy_message() {
+        assert_eq!(
+            parse_url("hutt://message/abc@example.com"),
+            Some(HuttUrl::Message { id: "abc@example.com".into(), account: None })
+        );
+    }
+
+    #[test]
+    fn parse_legacy_thread() {
+        assert_eq!(
+            parse_url("hutt://thread/abc@example.com"),
+            Some(HuttUrl::Thread { id: "abc@example.com".into(), account: None })
+        );
+    }
+
+    #[test]
+    fn parse_legacy_search() {
+        assert_eq!(
+            parse_url("hutt://search/from%3Aalice"),
+            Some(HuttUrl::Search { query: "from:alice".into(), account: None })
+        );
+    }
+
+    #[test]
+    fn parse_legacy_compose() {
+        assert_eq!(
+            parse_url("hutt://compose?to=bob%40example.com&subject=Hello"),
+            Some(HuttUrl::Compose {
+                to: "bob@example.com".into(),
+                subject: "Hello".into(),
+                account: None,
+            })
+        );
+    }
+
+    // ── Invalid URLs ───────────────────────────────────────────
+
+    #[test]
+    fn parse_invalid() {
+        assert_eq!(parse_url("https://example.com"), None);
+        assert_eq!(parse_url("hutt://message/"), None);
+        assert_eq!(parse_url("hutt://unknown/foo"), None);
+        assert_eq!(parse_url("hutt:search?q="), None);
+    }
+
+    // ── Formatting ─────────────────────────────────────────────
+
+    #[test]
+    fn format_mid_message() {
+        assert_eq!(format_message_url("abc@example.com"), "mid:abc@example.com");
+    }
+
+    #[test]
+    fn format_mid_thread() {
+        assert_eq!(format_thread_url("abc@example.com"), "mid:abc@example.com?view=thread");
+    }
+
+    #[test]
+    fn format_mailto() {
+        assert_eq!(format_compose_url("bob@example.com", "Hi"), "mailto:bob@example.com?subject=Hi");
+        assert_eq!(format_compose_url("bob@example.com", ""), "mailto:bob@example.com");
+    }
+
+    // ── Roundtrip ──────────────────────────────────────────────
+
+    #[test]
+    fn url_encode_decode_roundtrip() {
         let original = "hello world! @#$%^&*()";
         let encoded = url_encode(original);
         let decoded = url_decode(&encoded);
@@ -549,13 +777,15 @@ mod tests {
     }
 
     #[test]
-    fn test_ipc_command_json_roundtrip() {
+    fn ipc_command_json_roundtrip() {
         let cmds = vec![
             IpcCommand::Open(HuttUrlSerde::Message {
                 id: "test@example.com".to_string(),
+                account: None,
             }),
             IpcCommand::Navigate {
                 folder: "/Inbox".to_string(),
+                account: None,
             },
             IpcCommand::Quit,
         ];

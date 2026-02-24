@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
 Name=Hutt Opener
-Comment=Open hutt:// URLs in the running hutt email client
+Comment=Open mid:, message:, mailto:, and hutt: URIs in hutt
 Exec=hutt-open %u
-MimeType=x-scheme-handler/hutt;
+MimeType=x-scheme-handler/hutt;x-scheme-handler/mid;x-scheme-handler/message;
 NoDisplay=true
 Terminal=false
 Categories=Network;Email;
