@@ -12,7 +12,6 @@ pub struct PreviewPane<'a> {
     pub envelope: Option<&'a Envelope>,
     pub body: Option<&'a str>,
     pub scroll: u16,
-    pub raw_headers: Option<&'a [(String, String)]>,
 }
 
 impl<'a> Widget for PreviewPane<'a> {
@@ -38,24 +37,12 @@ impl<'a> Widget for PreviewPane<'a> {
             .fg(Color::White)
             .add_modifier(Modifier::BOLD);
 
-        let mut lines: Vec<Line> = Vec::new();
-
-        if let Some(headers) = self.raw_headers {
-            // Show all raw headers
-            for (name, value) in headers {
-                let label = format!("{}: ", name);
-                lines.push(Line::from(vec![
-                    Span::styled(label, header_style),
-                    Span::styled(value.as_str(), value_style),
-                ]));
-            }
-        } else {
-            // Standard compact headers
-            lines.push(Line::from(vec![
+        let mut lines = vec![
+            Line::from(vec![
                 Span::styled("Subject: ", header_style),
                 Span::styled(&envelope.subject, subject_style),
-            ]));
-            lines.push(Line::from(vec![
+            ]),
+            Line::from(vec![
                 Span::styled("From:    ", header_style),
                 Span::styled(
                     envelope
@@ -66,8 +53,8 @@ impl<'a> Widget for PreviewPane<'a> {
                         .join(", "),
                     value_style,
                 ),
-            ]));
-            lines.push(Line::from(vec![
+            ]),
+            Line::from(vec![
                 Span::styled("To:      ", header_style),
                 Span::styled(
                     envelope
@@ -78,16 +65,16 @@ impl<'a> Widget for PreviewPane<'a> {
                         .join(", "),
                     value_style,
                 ),
-            ]));
-            lines.push(Line::from(vec![
+            ]),
+            Line::from(vec![
                 Span::styled("Date:    ", header_style),
                 Span::styled(
                     envelope.date.format("%Y-%m-%d %H:%M %Z").to_string(),
                     value_style,
                 ),
-            ]));
-        }
-        lines.push(Line::from("")); // separator
+            ]),
+            Line::from(""), // separator
+        ];
 
         // Add body lines
         if let Some(body) = self.body {
