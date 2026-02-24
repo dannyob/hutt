@@ -396,11 +396,13 @@ impl App {
         let active = self.active_account;
         let active_folders = self.tabs_for_account(active, Some(&self.current_folder));
         let mut other_folders: Vec<(usize, Vec<String>)> = Vec::new();
-        for idx in 0..self.config.accounts.len() {
-            if idx != active {
-                let folders = self.tabs_for_account(idx, None);
-                if !folders.is_empty() {
-                    other_folders.push((idx, folders));
+        if self.config.background_servers {
+            for idx in 0..self.config.accounts.len() {
+                if idx != active {
+                    let folders = self.tabs_for_account(idx, None);
+                    if !folders.is_empty() {
+                        other_folders.push((idx, folders));
+                    }
                 }
             }
         }
@@ -2305,20 +2307,22 @@ pub async fn run(mut app: App) -> Result<()> {
     }
 
     // Spawn background mu servers for non-active accounts (for prefetch)
-    for idx in 0..app.config.accounts.len() {
-        if idx == app.active_account {
-            continue;
-        }
-        let muhome = app.config.effective_muhome(idx);
-        match MuClient::start(muhome.as_deref()).await {
-            Ok(client) => {
-                let name = app.config.accounts[idx].name.as_str();
-                debug_log!("background mu: started for account {} ({:?})", name, muhome);
-                app.background_mu.insert(idx, client);
+    if app.config.background_servers {
+        for idx in 0..app.config.accounts.len() {
+            if idx == app.active_account {
+                continue;
             }
-            Err(e) => {
-                let name = app.config.accounts.get(idx).map(|a| a.name.as_str()).unwrap_or("?");
-                debug_log!("background mu: failed for account {} ({}), prefetch unavailable", name, e);
+            let muhome = app.config.effective_muhome(idx);
+            match MuClient::start(muhome.as_deref()).await {
+                Ok(client) => {
+                    let name = app.config.accounts[idx].name.as_str();
+                    debug_log!("background mu: started for account {} ({:?})", name, muhome);
+                    app.background_mu.insert(idx, client);
+                }
+                Err(e) => {
+                    let name = app.config.accounts.get(idx).map(|a| a.name.as_str()).unwrap_or("?");
+                    debug_log!("background mu: failed for account {} ({}), prefetch unavailable", name, e);
+                }
             }
         }
     }
