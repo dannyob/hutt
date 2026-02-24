@@ -1687,14 +1687,31 @@ impl App {
             Action::MoveDown => self.move_down(),
             Action::MoveUp => self.move_up(),
             Action::JumpTop => {
-                self.selected = 0;
-                self.preview_scroll = 0;
+                match self.mode {
+                    InputMode::ThreadView => {
+                        self.thread_selected = 0;
+                        self.thread_scroll = 0;
+                    }
+                    _ => {
+                        self.selected = 0;
+                        self.preview_scroll = 0;
+                    }
+                }
             }
             Action::JumpBottom => {
-                let count = self.visible_count();
-                if count > 0 {
-                    self.selected = count - 1;
-                    self.preview_scroll = 0;
+                match self.mode {
+                    InputMode::ThreadView => {
+                        if !self.thread_messages.is_empty() {
+                            self.thread_selected = self.thread_messages.len() - 1;
+                        }
+                    }
+                    _ => {
+                        let count = self.visible_count();
+                        if count > 0 {
+                            self.selected = count - 1;
+                            self.preview_scroll = 0;
+                        }
+                    }
                 }
             }
             Action::ScrollPreviewDown => match self.mode {

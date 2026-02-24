@@ -649,8 +649,20 @@ impl KeyMapper {
     }
 
     fn handle_thread(&mut self, key: KeyEvent) -> Action {
+        // Handle g-prefix sequences in thread view
+        if let Some(first) = self.pending.take() {
+            return match (first, key.code) {
+                (KeyCode::Char('g'), KeyCode::Char('g')) => Action::JumpTop,
+                _ => Action::Noop,
+            };
+        }
         match (key.code, key.modifiers) {
             (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => Action::CloseThread,
+            (KeyCode::Char('g'), KeyModifiers::NONE) => {
+                self.pending = Some(KeyCode::Char('g'));
+                Action::Noop
+            }
+            (KeyCode::Char('G'), KeyModifiers::SHIFT) => Action::JumpBottom,
             (KeyCode::Char('j'), KeyModifiers::NONE)
             | (KeyCode::Char('n'), KeyModifiers::NONE)
             | (KeyCode::Down, _) => Action::ThreadNext,
