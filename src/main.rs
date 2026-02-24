@@ -16,6 +16,14 @@ use anyhow::{bail, Result};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Output format for remote commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputFormat {
+    Silent,
+    Sexp,
+    Json,
+}
+
 fn print_help() {
     eprintln!(
         "hutt {VERSION} — a fast, keyboard-driven TUI email client
@@ -79,6 +87,11 @@ fn print_remote_help() {
 USAGE:
     hutt remote <COMMAND> [ARGS]
 
+OUTPUT FLAGS:
+    --sexp                  Print results as S-expressions (one per line)
+    --json                  Print results as JSON (ndjson, one per line)
+    --wrapped               Wrap output in a single object/list
+
 COMMANDS:
     open <MESSAGE-ID>           Open a message by Message-ID
     thread <MESSAGE-ID>         Open a thread by Message-ID
@@ -113,6 +126,34 @@ fn extract_account(args: &[String]) -> (Option<String>, Vec<String>) {
     (account, rest)
 }
 
+/// Extract --sexp, --json, --wrapped from args, returning (format, wrapped, remaining).
+fn extract_output_flags(args: &[String]) -> Result<(OutputFormat, bool, Vec<String>)> {
+    let mut format = OutputFormat::Silent;
+    let mut wrapped = false;
+    let mut rest = Vec::new();
+
+    for arg in args {
+        match arg.as_str() {
+            "--sexp" => {
+                if format == OutputFormat::Json {
+                    bail!("--sexp and --json are mutually exclusive");
+                }
+                format = OutputFormat::Sexp;
+            }
+            "--json" => {
+                if format == OutputFormat::Sexp {
+                    bail!("--sexp and --json are mutually exclusive");
+                }
+                format = OutputFormat::Json;
+            }
+            "--wrapped" => wrapped = true,
+            _ => rest.push(arg.clone()),
+        }
+    }
+
+    Ok((format, wrapped, rest))
+}
+
 fn run_config(args: &[String]) -> Result<()> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("path");
     match sub {
@@ -138,7 +179,78 @@ USAGE:
     Ok(())
 }
 
+/// Format and print IPC response according to output flags.
+fn print_ipc_output(resp: &links::IpcResponse, format: OutputFormat, wrapped: bool) {
+    match resp {
+        links::IpcResponse::Ok => {
+            if wrapped {
+                match format {
+                    OutputFormat::Sexp => println!("(:found 0)"),
+                    OutputFormat::Json => println!("{{\"found\":0}}"),
+                    OutputFormat::Silent => {}
+                }
+            }
+        }
+        links::IpcResponse::Error { message } => {
+            match format {
+                OutputFormat::Sexp => {
+                    println!(
+                        "(:error \"{}\")",
+                        message.replace('\\', "\\\\").replace('"', "\\\"")
+                    );
+                }
+                OutputFormat::Json => {
+                    let obj = serde_json::json!({"error": message});
+                    println!("{}", obj);
+                }
+                OutputFormat::Silent => {}
+            }
+        }
+        links::IpcResponse::MuFrames { frames } => {
+            match format {
+                OutputFormat::Silent => {}
+                OutputFormat::Sexp => {
+                    if wrapped {
+                        let joined = frames.join(" ");
+                        println!("(:headers ({}) :found {})", joined, frames.len());
+                    } else {
+                        for frame in frames {
+                            println!("{}", frame);
+                        }
+                    }
+                }
+                OutputFormat::Json => {
+                    if wrapped {
+                        let json_vals: Vec<serde_json::Value> = frames
+                            .iter()
+                            .filter_map(|s| mu_sexp::sexp_to_json(s).ok())
+                            .collect();
+                        let obj = serde_json::json!({
+                            "headers": json_vals,
+                            "found": frames.len(),
+                        });
+                        println!("{}", obj);
+                    } else {
+                        for frame in frames {
+                            if let Ok(json) = mu_sexp::sexp_to_json(frame) {
+                                println!("{}", json);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn run_remote(args: &[String]) -> Result<()> {
+    if args.is_empty() {
+        print_remote_help();
+        std::process::exit(1);
+    }
+
+    let (format, wrapped, args) = extract_output_flags(args)?;
+
     if args.is_empty() {
         print_remote_help();
         std::process::exit(1);
@@ -206,11 +318,19 @@ async fn run_remote(args: &[String]) -> Result<()> {
     };
 
     let resp = links::send_ipc_command(&cmd).await?;
-    match resp {
-        links::IpcResponse::Ok | links::IpcResponse::MuFrames { .. } => Ok(()),
+
+    // Print structured output if requested
+    print_ipc_output(&resp, format, wrapped);
+
+    match &resp {
         links::IpcResponse::Error { message } => {
-            bail!("hutt: {}", message);
+            if format == OutputFormat::Silent {
+                bail!("hutt: {}", message);
+            }
+            // Already printed structured error above
+            std::process::exit(1);
         }
+        _ => Ok(()),
     }
 }
 
