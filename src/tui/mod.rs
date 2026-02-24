@@ -747,7 +747,8 @@ impl App {
         } else if self.current_folder.starts_with('/') {
             format!("maildir:{}", self.current_folder)
         } else {
-            self.current_folder.clone()
+            // Free-form search query — expand any #split / @smart references
+            self.expand_folder_references(&self.current_folder)
         };
         if self.filter_unread {
             query.push_str(" AND flag:unread");
@@ -759,6 +760,22 @@ impl App {
             query.push_str(" AND NOT flag:replied");
         }
         query
+    }
+
+    /// Expand `#split` and `@smart` references in a search query to their
+    /// underlying mu queries.  Unknown references are left as-is (mu will
+    /// treat them as plain text search terms).
+    fn expand_folder_references(&self, input: &str) -> String {
+        let inbox_folder = self.account()
+            .map(|a| a.folders.inbox.clone())
+            .unwrap_or_else(|| "/Inbox".to_string());
+
+        expand_folder_refs(
+            input,
+            &inbox_folder,
+            &self.split_queries,
+            &self.smart_folder_queries,
+        )
     }
 
     fn collect_known_folders(&mut self) {
@@ -1850,11 +1867,13 @@ impl App {
 
             // Search
             Action::EnterSearch => {
-                // Pre-fill with the current view's query
-                self.search_input = if let Some(q) =
-                    self.smart_folder_queries.get(&self.current_folder)
+                // Pre-fill with the current folder's short name.
+                // #split and @smart references are expanded to their queries
+                // on submit (see expand_folder_references).
+                self.search_input = if self.current_folder.starts_with('#')
+                    || self.current_folder.starts_with('@')
                 {
-                    format!("{} ", q)
+                    format!("{} ", self.current_folder)
                 } else if self.current_folder.starts_with('/') {
                     format!("maildir:{} ", self.current_folder)
                 } else {
@@ -3191,4 +3210,111 @@ pub async fn run(mut app: App) -> Result<()> {
     }
     app.mu.quit().await?;
     Ok(())
+}
+
+/// Expand `#split` and `@smart` folder references in a query string.
+///
+/// - `#name` → `(maildir:<inbox> AND (<split_query>))`
+/// - `@name` → `(<smart_query>)`
+/// - Unknown references are left as-is.
+fn expand_folder_refs(
+    input: &str,
+    inbox_folder: &str,
+    split_queries: &HashMap<String, String>,
+    smart_folder_queries: &HashMap<String, String>,
+) -> String {
+    let mut result = input.to_string();
+
+    // Expand #split references
+    for (name, query) in split_queries {
+        if result.contains(name.as_str()) {
+            let expanded = format!("(maildir:{} AND ({}))", inbox_folder, query);
+            result = result.replace(name.as_str(), &expanded);
+        }
+    }
+
+    // Expand @smart references
+    for (name, query) in smart_folder_queries {
+        if result.contains(name.as_str()) {
+            let expanded = format!("({})", query);
+            result = result.replace(name.as_str(), &expanded);
+        }
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_split_reference() {
+        let mut splits = HashMap::new();
+        splits.insert("#updates".to_string(), "from:noreply@example.com".to_string());
+        let smarts = HashMap::new();
+
+        let result = expand_folder_refs("#updates", "/Inbox", &splits, &smarts);
+        assert_eq!(result, "(maildir:/Inbox AND (from:noreply@example.com))");
+    }
+
+    #[test]
+    fn expand_smart_reference() {
+        let splits = HashMap::new();
+        let mut smarts = HashMap::new();
+        smarts.insert("@recent".to_string(), "date:1w..now".to_string());
+
+        let result = expand_folder_refs("@recent", "/Inbox", &splits, &smarts);
+        assert_eq!(result, "(date:1w..now)");
+    }
+
+    #[test]
+    fn expand_reference_with_extra_terms() {
+        let mut splits = HashMap::new();
+        splits.insert("#updates".to_string(), "from:noreply@example.com".to_string());
+        let smarts = HashMap::new();
+
+        let result = expand_folder_refs("#updates AND flag:unread", "/Inbox", &splits, &smarts);
+        assert_eq!(
+            result,
+            "(maildir:/Inbox AND (from:noreply@example.com)) AND flag:unread"
+        );
+    }
+
+    #[test]
+    fn expand_unknown_reference_unchanged() {
+        let splits = HashMap::new();
+        let smarts = HashMap::new();
+
+        let result = expand_folder_refs("#unknown AND test", "/Inbox", &splits, &smarts);
+        assert_eq!(result, "#unknown AND test");
+    }
+
+    #[test]
+    fn expand_plain_query_unchanged() {
+        let splits = HashMap::new();
+        let smarts = HashMap::new();
+
+        let result = expand_folder_refs("from:bob@example.com", "/Inbox", &splits, &smarts);
+        assert_eq!(result, "from:bob@example.com");
+    }
+
+    #[test]
+    fn expand_multiple_references() {
+        let mut splits = HashMap::new();
+        splits.insert("#alerts".to_string(), "subject:alert".to_string());
+        let mut smarts = HashMap::new();
+        smarts.insert("@flagged".to_string(), "flag:flagged".to_string());
+
+        let result = expand_folder_refs(
+            "#alerts OR @flagged",
+            "/INBOX",
+            &splits,
+            &smarts,
+        );
+        assert_eq!(
+            result,
+            "(maildir:/INBOX AND (subject:alert)) OR (flag:flagged)"
+        );
+    }
 }
