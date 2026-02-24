@@ -210,10 +210,6 @@ pub struct App {
     // Confirmation prompt: if Some, shows "prompt (y/n)" in status bar
     pub pending_confirm: Option<ConfirmAction>,
 
-    // Show all headers in preview / thread view
-    pub show_all_headers: bool,
-    pub raw_headers_cache: HashMap<String, Vec<(String, String)>>,
-
     // Undo
     pub undo_stack: UndoStack,
 
@@ -652,8 +648,6 @@ impl App {
             should_quit: false,
             mode: InputMode::Normal,
             pending_confirm: None,
-            show_all_headers: false,
-            raw_headers_cache: HashMap::new(),
             undo_stack: UndoStack::new(),
             selected_set: HashSet::new(),
             search_input: String::new(),
@@ -2164,15 +2158,6 @@ impl App {
                 self.mode = InputMode::Help;
             }
 
-            Action::ToggleHeaders => {
-                self.show_all_headers = !self.show_all_headers;
-                if self.show_all_headers {
-                    self.set_status("Showing all headers".to_string());
-                } else {
-                    self.set_status("Showing standard headers".to_string());
-                }
-            }
-
             // Command palette
             Action::OpenCommandPalette => {
                 self.palette_filter.clear();
@@ -2763,25 +2748,10 @@ pub async fn run(mut app: App) -> Result<()> {
             // Content
             match app.mode {
                 InputMode::ThreadView => {
-                    // Load raw headers for expanded messages if needed
-                    if app.show_all_headers {
-                        for msg in &app.thread_messages {
-                            if msg.expanded && !app.raw_headers_cache.contains_key(&msg.envelope.message_id) {
-                                if let Ok(headers) = mime_render::extract_raw_headers(std::path::Path::new(&msg.envelope.path)) {
-                                    app.raw_headers_cache.insert(msg.envelope.message_id.clone(), headers);
-                                }
-                            }
-                        }
-                    }
                     let tv = ThreadView {
                         messages: &app.thread_messages,
                         selected: app.thread_selected,
                         scroll: app.thread_scroll,
-                        raw_headers: if app.show_all_headers {
-                            Some(&app.raw_headers_cache)
-                        } else {
-                            None
-                        },
                     };
                     frame.render_widget(tv, outer[1]);
                 }
@@ -2827,32 +2797,13 @@ pub async fn run(mut app: App) -> Result<()> {
                         app.scroll_offset = new_offset;
                     }
 
-                    // Load raw headers if needed (must do before borrowing envelope)
-                    if app.show_all_headers {
-                        if let Some(env) = app.preview_envelope() {
-                            let path = env.path.clone();
-                            let msg_id = env.message_id.clone();
-                            if let std::collections::hash_map::Entry::Vacant(e) = app.raw_headers_cache.entry(msg_id) {
-                                if let Ok(headers) = mime_render::extract_raw_headers(std::path::Path::new(&path)) {
-                                    e.insert(headers);
-                                }
-                            }
-                        }
-                    }
-
                     let envelope = app.preview_envelope();
                     let body = envelope
                         .and_then(|e| app.preview_cache.get(&e.message_id, preview_width));
-                    let raw_headers = if app.show_all_headers {
-                        envelope.and_then(|e| app.raw_headers_cache.get(&e.message_id).map(|v| v.as_slice()))
-                    } else {
-                        None
-                    };
                     let preview = PreviewPane {
                         envelope,
                         body,
                         scroll: app.preview_scroll,
-                        raw_headers,
                     };
                     frame.render_widget(preview, content[1]);
                 }
