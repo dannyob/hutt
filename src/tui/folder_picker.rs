@@ -212,6 +212,50 @@ pub struct SmartFolderPopup<'a> {
     pub title: &'a str,
 }
 
+impl<'a> SmartFolderPopup<'a> {
+    /// Compute the popup layout and return the area where the textarea should be rendered.
+    pub fn textarea_area(&self, area: Rect) -> Rect {
+        let label_len: u16 = 7;
+        let max_width = (area.width * 80 / 100).max(40);
+        let content_len = self.query.len().max(self.name.len()) as u16 + label_len + 2;
+        let popup_width = content_len.clamp(60, max_width);
+        let inner_width = popup_width.saturating_sub(2);
+        let query_field_width = inner_width.saturating_sub(label_len) as usize;
+        let query_lines = wrap_text(self.query, query_field_width);
+        let query_line_count = query_lines.len().max(1) as u16;
+        let preview_lines = if self.count.is_some() {
+            1 + self.preview.len().min(5) as u16
+        } else if !self.query.is_empty() {
+            1
+        } else {
+            0
+        };
+        let name_line: u16 = if self.phase == 1 { 1 } else { 0 };
+        let content_height = query_line_count + name_line + 1 + preview_lines + 1;
+        let popup_height = (content_height + 2).clamp(8, area.height.saturating_sub(4));
+        let popup = centered_rect(popup_width, popup_height, area);
+
+        // The active field area
+        if self.phase == 0 {
+            // Query field: starts at popup.y + 1 (border), x + 1 (border) + label_len
+            Rect::new(
+                popup.x + 1 + label_len,
+                popup.y + 1,
+                inner_width.saturating_sub(label_len),
+                query_line_count,
+            )
+        } else {
+            // Name field: after query lines
+            Rect::new(
+                popup.x + 1 + label_len,
+                popup.y + 1 + query_line_count,
+                inner_width.saturating_sub(label_len),
+                1,
+            )
+        }
+    }
+}
+
 impl<'a> Widget for SmartFolderPopup<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let label_len: u16 = 7; // "Query: " or "Name:  "
@@ -274,38 +318,36 @@ impl<'a> Widget for SmartFolderPopup<'a> {
 
         let text_style = Style::default().fg(Color::White);
         let label_style = Style::default().fg(Color::DarkGray);
-        let cursor_style = Style::default().fg(Color::White).bg(Color::Gray);
 
         let mut y = inner.y;
 
-        // Query field — word-wrapped
+        // Query field — label only; textarea renders the text
         buf.set_string(inner.x, y, "Query: ", label_style);
-        for line in &query_lines {
-            if y >= inner.y + inner.height {
-                break;
+        // If phase != 0 (not active), render the query text ourselves
+        if self.phase != 0 {
+            for line in &query_lines {
+                if y >= inner.y + inner.height {
+                    break;
+                }
+                buf.set_string(inner.x + label_len, y, line, text_style);
+                y += 1;
             }
-            let x_offset = label_len; // continuation lines align with first
-            buf.set_string(inner.x + x_offset, y, line, text_style);
-            y += 1;
-        }
-        if self.phase == 0 {
-            // Cursor at end of last query line
-            let last_line = query_lines.last().map(|s| s.len()).unwrap_or(0);
-            let cursor_y = (inner.y + query_line_count).saturating_sub(1);
-            let cx = inner.x + label_len + last_line as u16;
-            if cx < inner.x + inner.width && cursor_y < inner.y + inner.height {
-                buf.set_string(cx, cursor_y, " ", cursor_style);
-            }
+        } else {
+            // Skip lines — textarea will render here
+            y += query_line_count;
         }
 
-        // Name field (only visible in phase 1)
+        // Name field
         if self.phase == 1 && y < inner.y + inner.height {
+            // Label only; textarea renders the name text
             buf.set_string(inner.x, y, "Name:  ", label_style);
-            let name_display = truncate_str(self.name, query_field_width);
-            buf.set_string(inner.x + label_len, y, &name_display, text_style);
-            let cx = inner.x + label_len + self.name.len().min(query_field_width) as u16;
-            if cx < inner.x + inner.width {
-                buf.set_string(cx, y, " ", cursor_style);
+            y += 1;
+        } else if self.phase != 1 && y < inner.y + inner.height {
+            // Not editing name — show it as static text if we have one
+            if !self.name.is_empty() {
+                buf.set_string(inner.x, y, "Name:  ", label_style);
+                let name_display = truncate_str(self.name, query_field_width);
+                buf.set_string(inner.x + label_len, y, &name_display, text_style);
             }
             y += 1;
         }
