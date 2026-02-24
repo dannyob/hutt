@@ -80,6 +80,9 @@ EXAMPLES:
     hutt r --json search from:alice     Search and output ndjson
     hutt r --sexp thread abc@host.com   Thread envelopes as sexp
     hutt r --json search q | jq '.path' Extract file paths with jq
+    hutt server                     Interactive mu server proxy
+    hutt server --eval '(ping)'    Single command evaluation
+    hutt server --muhome ~/.mu/work Select account by muhome
 
 ENVIRONMENT:
     HUTT_LOG=<path>             Debug log file (same as --log)

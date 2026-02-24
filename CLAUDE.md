@@ -46,16 +46,17 @@ Each widget is a separate module: `envelope_list` (message list), `preview` (mes
 - **Compose** (`compose.rs`): Launches external editor, builds RFC 2822 messages. TUI suspends during editing.
 - **SMTP** (`send.rs`): Sends via `lettre` with STARTTLS/SSL/OAuth2 support.
 - **MIME rendering** (`mime_render.rs`): `RenderCache` caches rendered bodies keyed by (message_id, terminal_width). Uses `mail-parser` + `html2text`.
-- **URI schemes** (`links.rs`): Accepts `mid:` (RFC 2392), `message:` (Apple Mail), `mailto:` (RFC 6068), and `hutt:` (app-specific search/navigate). Unix socket IPC at `$XDG_RUNTIME_DIR/hutt.sock`. All IPC commands accept optional `account` parameter. Legacy `hutt://` URLs accepted for backwards compatibility.
+- **URI schemes** (`links.rs`): Accepts `mid:` (RFC 2392), `message:` (Apple Mail), `mailto:` (RFC 6068), and `hutt:` (app-specific search/navigate). Bidirectional IPC: commands return `IpcResponse` (Ok/Error/MuFrames). `--sexp`/`--json`/`--wrapped` flags on `hutt remote` format the response for scripting. Unix socket IPC at `$XDG_RUNTIME_DIR/hutt.sock`. All IPC commands accept optional `account` parameter. Legacy `hutt://` URLs accepted for backwards compatibility.
 - **Smart folders** (`smart_folders.rs`): Saved mu queries, persisted as TOML in `~/.config/hutt/smart-folders/`.
 - **Split inbox** (`splits.rs`): Inbox partitioning by query. Splits are persisted per-account as `~/.config/hutt/splits.<account>.toml`. Split queries run eagerly at startup/reindex, caching matched docids in `HashSet<u32>`. Inbox view excludes matched messages. `#` prefix in folder names.
 - **Tab bar** (`tui/status_bar.rs` `TopBar`): Clickable folder tabs replacing the old top bar. Renders account badge, pinned inbox, scrollable tabs, overflow button. `TabRegion`/`TabRegionKind` structs enable mouse hit testing. Tab order configurable via `tabs` account config field with `/`, `#`, `@` wildcards.
+- **hutt server** (`main.rs::run_server`): Drop-in mu server replacement. Proxies raw S-expressions through hutt's running mu server via bidirectional IPC. Falls back to standalone mu server when hutt isn't running.
 
 ### Gmail archive handling
 Gmail IMAP uses labels, not folders. Messages in Inbox already exist in `[Gmail]/All Mail`. Archiving via `mu move` to All Mail creates duplicates that break mbsync (`duplicate UID` errors). Instead, `triage_move()` detects Gmail accounts (archive folder contains `[Gmail]`) and uses `MuClient::remove_msg()` to delete from Inbox. The message remains in All Mail because that's how Gmail works. Undo is not supported for Gmail archive (message is removed from mu's database).
 
-### hutt server (planned)
-Drop-in replacement for `mu server` that proxies commands through hutt's running mu server via bidirectional IPC. Falls back to standalone `mu server` when hutt isn't running or `--muhome` doesn't match any account. Design doc: `docs/plans/2026-02-23-hutt-server-design.md`. Implementation plan: `docs/plans/2026-02-23-hutt-server-plan.md`.
+### hutt server
+Drop-in replacement for `mu server` that proxies commands through hutt's running mu server via bidirectional IPC. Falls back to standalone `mu server` when hutt isn't running or `--muhome` doesn't match any account. Invoked via `hutt server [OPTIONS]`. Supports `--eval` for single-command evaluation, `--muhome`/`--account` for account selection, and interactive mode that reads S-expressions from stdin. Design doc: `docs/plans/2026-02-23-hutt-server-design.md`. Implementation plan: `docs/plans/2026-02-23-hutt-server-plan.md`.
 
 ### Mouse support
 Crossterm mouse capture enabled during normal operation (disabled during compose/shell suspend). `MouseEventKind::Down` on row 0 checks `tab_regions` for tab/account/overflow clicks. Border drag (`dragging_border` + `list_pct`) resizes the list/preview split.
