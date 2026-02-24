@@ -59,21 +59,6 @@ pub fn format_thread_url(message_id: &str) -> String {
     format!("mid:{}?view=thread", message_id)
 }
 
-/// Format a `mailto:` URI (RFC 6068).
-#[allow(dead_code)]
-pub fn format_compose_url(to: &str, subject: &str) -> String {
-    if subject.is_empty() {
-        format!("mailto:{}", to)
-    } else {
-        format!("mailto:{}?subject={}", to, url_encode(subject))
-    }
-}
-
-/// Format a `hutt:search?q=<query>` URI.
-#[allow(dead_code)]
-pub fn format_search_url(query: &str) -> String {
-    format!("hutt:search?q={}", url_encode(query))
-}
 
 // ---------------------------------------------------------------------------
 // URI parsing (input — IPC, URL handler, clipboard)
@@ -206,12 +191,6 @@ pub fn parse_navigate_url(url: &str) -> Option<(String, Option<String>)> {
     Some((folder, account))
 }
 
-/// Backwards-compatible wrapper. Calls parse_url.
-#[allow(dead_code)]
-pub fn parse_hutt_url(url: &str) -> Option<HuttUrl> {
-    parse_url(url)
-}
-
 // ---------------------------------------------------------------------------
 // Clipboard
 // ---------------------------------------------------------------------------
@@ -236,12 +215,6 @@ pub fn open_html_in_browser(html: &[u8]) -> Result<()> {
     std::fs::write(&path, html)
         .with_context(|| format!("writing temp HTML to {}", path.display()))?;
     open_path(path.to_str().context("non-UTF-8 temp path")?)
-}
-
-/// Open a URL (or file path) in the default browser / handler.
-#[allow(dead_code)]
-pub fn open_url(url: &str) -> Result<()> {
-    open_path(url)
 }
 
 fn open_path(target: &str) -> Result<()> {
@@ -449,115 +422,10 @@ pub async fn send_ipc_command(cmd: &IpcCommand) -> Result<IpcResponse> {
     Ok(resp)
 }
 
-// ---------------------------------------------------------------------------
-// macOS URL handler installation
-// ---------------------------------------------------------------------------
-
-/// Install a minimal .app bundle in ~/Applications that registers the
-/// `mid:`, `message:`, and `hutt:` URL schemes on macOS.
-#[allow(dead_code)]
-pub fn install_macos_handler() -> Result<()> {
-    let home = std::env::var("HOME").context("HOME not set")?;
-    let app_dir = PathBuf::from(&home).join("Applications/Hutt Opener.app");
-    let contents = app_dir.join("Contents");
-    let macos_dir = contents.join("MacOS");
-
-    std::fs::create_dir_all(&macos_dir)
-        .with_context(|| format!("creating {}", macos_dir.display()))?;
-
-    // --- Info.plist ---
-    let plist = r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleName</key>
-    <string>Hutt Opener</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.hutt.opener</string>
-    <key>CFBundleVersion</key>
-    <string>1.0</string>
-    <key>CFBundleExecutable</key>
-    <string>hutt-open</string>
-    <key>CFBundleURLTypes</key>
-    <array>
-        <dict>
-            <key>CFBundleURLName</key>
-            <string>Hutt URL</string>
-            <key>CFBundleURLSchemes</key>
-            <array>
-                <string>hutt</string>
-                <string>mid</string>
-                <string>message</string>
-            </array>
-        </dict>
-    </array>
-</dict>
-</plist>
-"#;
-    let plist_path = contents.join("Info.plist");
-    std::fs::write(&plist_path, plist)
-        .with_context(|| format!("writing {}", plist_path.display()))?;
-
-    // --- Executable shell script ---
-    // Uses `hutt remote` to forward URLs to the running instance.
-    let script = r#"#!/bin/bash
-# Hutt URL handler — forwards mid:, message:, and hutt: URLs to the running instance.
-URL="$1"
-if [ -z "$URL" ]; then
-    exit 0
-fi
-
-# Find the hutt binary
-HUTT="${HUTT_BIN:-hutt}"
-if ! command -v "$HUTT" &>/dev/null; then
-    HUTT="$HOME/.local/bin/hutt"
-fi
-
-# Use `hutt remote` to dispatch the URL.
-# The remote subcommand's 'open' accepts any URI format.
-"$HUTT" r open-url "$URL"
-"#.to_string();
-
-    let script_path = macos_dir.join("hutt-open");
-    std::fs::write(&script_path, script)
-        .with_context(|| format!("writing {}", script_path.display()))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(&script_path, perms)
-            .with_context(|| format!("chmod {}", script_path.display()))?;
-    }
-
-    let _ = std::process::Command::new("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
-        .args(["-f", app_dir.to_str().unwrap_or("")])
-        .output();
-
-    Ok(())
-}
 
 // ---------------------------------------------------------------------------
 // Helpers: minimal percent-encoding / decoding
 // ---------------------------------------------------------------------------
-
-fn url_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => {
-                out.push('%');
-                out.push(hex_digit(b >> 4));
-                out.push(hex_digit(b & 0x0f));
-            }
-        }
-    }
-    out
-}
 
 fn url_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(s.len());
@@ -575,14 +443,6 @@ fn url_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_digit(n: u8) -> char {
-    match n {
-        0..=9 => (b'0' + n) as char,
-        10..=15 => (b'A' + n - 10) as char,
-        _ => '0',
-    }
 }
 
 fn from_hex(b: u8) -> Option<u8> {
@@ -801,20 +661,13 @@ mod tests {
         assert_eq!(format_thread_url("abc@example.com"), "mid:abc@example.com?view=thread");
     }
 
-    #[test]
-    fn format_mailto() {
-        assert_eq!(format_compose_url("bob@example.com", "Hi"), "mailto:bob@example.com?subject=Hi");
-        assert_eq!(format_compose_url("bob@example.com", ""), "mailto:bob@example.com");
-    }
-
     // ── Roundtrip ──────────────────────────────────────────────
 
     #[test]
-    fn url_encode_decode_roundtrip() {
-        let original = "hello world! @#$%^&*()";
-        let encoded = url_encode(original);
-        let decoded = url_decode(&encoded);
-        assert_eq!(decoded, original);
+    fn url_decode_basic() {
+        assert_eq!(url_decode("hello%20world"), "hello world");
+        assert_eq!(url_decode("from%3Aalice"), "from:alice");
+        assert_eq!(url_decode("plain"), "plain");
     }
 
     #[test]

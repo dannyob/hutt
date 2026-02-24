@@ -324,15 +324,6 @@ pub fn parse_action_name(name: &str) -> Result<Action, String> {
     }
 }
 
-#[allow(dead_code)] // reserved for future per-mode config in [bindings.*]
-fn parse_mode_name(name: &str) -> Result<InputMode, String> {
-    match name {
-        "normal" => Ok(InputMode::Normal),
-        "thread" | "thread_view" => Ok(InputMode::ThreadView),
-        _ => Err(format!("unknown mode: {:?}", name)),
-    }
-}
-
 /// Convert a `BindingValue` from config into a `BindAction`.
 fn resolve_binding_value(value: &BindingValue) -> Result<BindAction, String> {
     match value {
