@@ -2,11 +2,11 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::{Line, Span},
     widgets::Widget,
 };
 
 use crate::keymap::InputMode;
+use crate::tui::{TabRegion, TabRegionKind};
 
 pub struct TopBar<'a> {
     pub folder: &'a str,
@@ -14,71 +14,181 @@ pub struct TopBar<'a> {
     pub total_count: usize,
     pub mode: &'a InputMode,
     pub thread_subject: Option<&'a str>,
-    /// Show account name when multiple accounts are configured.
     pub account_name: Option<&'a str>,
     pub conversations_mode: bool,
+    pub tabs: &'a [String],
+    pub tab_scroll: usize,
+    pub multi_account: bool,
 }
 
-impl<'a> Widget for TopBar<'a> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let style = Style::default().bg(Color::DarkGray).fg(Color::White);
-        buf.set_style(area, style);
+/// Result of rendering the tab bar — the hit regions for mouse clicks.
+pub struct TabBarRegions {
+    pub regions: Vec<TabRegion>,
+}
 
-        let left = match self.mode {
-            InputMode::ThreadView => {
-                let subj = self.thread_subject.unwrap_or("Thread");
-                format!(" {} ", subj)
-            }
-            _ => {
-                if self.folder.starts_with('@') {
-                    format!(" \u{2605} {} ", &self.folder[1..])
-                } else {
-                    format!(" {} ", self.folder)
-                }
-            }
-        };
+impl<'a> TopBar<'a> {
+    /// Render the tab bar and return hit regions for mouse interaction.
+    pub fn render_with_regions(self, area: Rect, buf: &mut Buffer) -> TabBarRegions {
+        let bar_style = Style::default().bg(Color::DarkGray).fg(Color::White);
+        buf.set_style(area, bar_style);
 
-        let unit = if self.conversations_mode {
-            "threads"
-        } else {
-            "messages"
-        };
+        let mut regions: Vec<TabRegion> = Vec::new();
+
+        // In thread view, show the thread subject (old behavior)
+        if *self.mode == InputMode::ThreadView {
+            let subj = self.thread_subject.unwrap_or("Thread");
+            let text = format!(" {} ", subj);
+            buf.set_string(
+                area.x,
+                area.y,
+                &text,
+                Style::default()
+                    .bg(Color::Blue)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            );
+            return TabBarRegions { regions };
+        }
+
+        let mut x = area.x;
+
+        // ── Account badge ──────────────────────────────────────────
+        if self.multi_account {
+            let name = self.account_name.unwrap_or("?");
+            let badge = format!(" {} ", name);
+            let badge_len = badge.len() as u16;
+            let account_style = Style::default()
+                .bg(Color::Indexed(236))
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD);
+            buf.set_string(x, area.y, &badge, account_style);
+            regions.push(TabRegion {
+                x_start: x,
+                x_end: x + badge_len,
+                kind: TabRegionKind::Account,
+            });
+            x += badge_len;
+            // Separator
+            buf.set_string(x, area.y, " ", bar_style);
+            x += 1;
+        }
+
+        // ── Right-aligned counts ───────────────────────────────────
+        let unit = if self.conversations_mode { "threads" } else { "messages" };
         let right = if self.unread_count > 0 {
             format!(" {}/{} unread ", self.unread_count, self.total_count)
         } else {
             format!(" {} {} ", self.total_count, unit)
         };
+        let right_len = right.len() as u16;
+        let right_x = area.x + area.width - right_len;
+        // We'll render the right count later, but reserve the space now
+        let overflow_width = 3u16; // " … "
+        let available_for_tabs = if right_x > x + overflow_width {
+            right_x - x - overflow_width
+        } else {
+            0
+        };
 
-        // Render left-aligned label
-        let mut spans = vec![Span::styled(
-            &left,
-            Style::default()
+        // ── Tabs ───────────────────────────────────────────────────
+        if self.tabs.is_empty() {
+            // Fallback: just show current folder
+            let text = format!(" {} ", self.folder);
+            let style = Style::default()
                 .bg(Color::Blue)
                 .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )];
-
-        // Show account indicator when multiple accounts exist
-        if let Some(name) = self.account_name {
-            spans.push(Span::styled(
-                format!(" [{}] ", name),
+                .add_modifier(Modifier::BOLD);
+            buf.set_string(x, area.y, &text, style);
+        } else {
+            // Pinned inbox (tab 0) is always shown
+            let inbox = &self.tabs[0];
+            let inbox_label = tab_label(inbox);
+            let inbox_len = inbox_label.len() as u16;
+            let inbox_selected = self.folder == inbox;
+            let inbox_style = if inbox_selected {
                 Style::default()
+                    .bg(Color::Blue)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                tab_style(inbox)
+            };
+            buf.set_string(x, area.y, &inbox_label, inbox_style);
+            regions.push(TabRegion {
+                x_start: x,
+                x_end: x + inbox_len,
+                kind: TabRegionKind::Tab(0),
+            });
+            x += inbox_len;
+
+            // Scrollable tabs (starting from tab_scroll, skipping index 0)
+            let scroll_start = self.tab_scroll.max(1);
+            let mut all_fit = true;
+            for i in scroll_start..self.tabs.len() {
+                let label = tab_label(&self.tabs[i]);
+                let label_len = label.len() as u16;
+                if x + label_len > area.x + available_for_tabs + (area.x + area.width - right_x - overflow_width) {
+                    // Won't fit — we need the overflow indicator
+                    all_fit = false;
+                    break;
+                }
+                let selected = self.folder == self.tabs[i];
+                let style = if selected {
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    tab_style(&self.tabs[i])
+                };
+                buf.set_string(x, area.y, &label, style);
+                regions.push(TabRegion {
+                    x_start: x,
+                    x_end: x + label_len,
+                    kind: TabRegionKind::Tab(i),
+                });
+                x += label_len;
+            }
+
+            // Overflow "…"
+            if !all_fit || scroll_start > 1 {
+                let overflow_label = " \u{2026} ";
+                let overflow_style = Style::default()
                     .bg(Color::DarkGray)
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ));
+                    .fg(Color::Gray);
+                // Position just before the right count
+                let overflow_x = right_x - overflow_width;
+                if overflow_x >= x {
+                    buf.set_string(overflow_x, area.y, overflow_label, overflow_style);
+                    regions.push(TabRegion {
+                        x_start: overflow_x,
+                        x_end: overflow_x + overflow_width,
+                        kind: TabRegionKind::Overflow,
+                    });
+                }
+            }
         }
 
-        let left_spans = Line::from(spans);
-        buf.set_line(area.x, area.y, &left_spans, area.width);
+        // ── Right count ────────────────────────────────────────────
+        buf.set_string(right_x, area.y, &right, bar_style);
 
-        // Render right-aligned count
-        let right_len = right.len() as u16;
-        if area.width > right_len + left.len() as u16 {
-            let rx = area.x + area.width - right_len;
-            buf.set_string(rx, area.y, &right, style);
-        }
+        TabBarRegions { regions }
     }
+}
+
+fn tab_label(folder: &str) -> String {
+    format!(" {} ", folder)
+}
+
+fn tab_style(folder: &str) -> Style {
+    let fg = if folder.starts_with('#') {
+        Color::Cyan
+    } else if folder.starts_with('@') {
+        Color::Yellow
+    } else {
+        Color::White
+    };
+    Style::default().bg(Color::DarkGray).fg(fg)
 }
 
 pub struct BottomBar<'a> {
@@ -113,6 +223,7 @@ impl<'a> BottomBar<'a> {
             InputMode::SmartFolderName => "Type name | Enter:save Esc:back",
             InputMode::MaildirCreate => "Type path | Enter:create Esc:cancel",
             InputMode::MoveToFolder => "Enter:move Esc:cancel | type to filter",
+            InputMode::AccountPicker => "j/k:nav Enter:select Esc:cancel",
         }
     }
 }

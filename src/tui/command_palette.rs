@@ -290,6 +290,12 @@ impl PaletteEntry {
                 shortcut: None,
                 action: Action::CreateSplit,
             },
+            PaletteEntry {
+                name: "Switch Account".into(),
+                description: "Open account picker".into(),
+                shortcut: Some("gA".into()),
+                action: Action::OpenAccountPicker,
+            },
             // Help
             PaletteEntry {
                 name: "Help".into(),
