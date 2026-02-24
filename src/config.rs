@@ -167,7 +167,7 @@ pub struct Snippet {
 pub enum BindingValue {
     /// `"archive"` (action name) or `"/Sent"` (folder path).
     Short(String),
-    /// `{ shell = "mbsync work", reindex = true, suspend = false }`.
+    /// `{ shell = "mbsync -a", reindex = true, suspend = false }`.
     Shell {
         shell: String,
         #[serde(default)]
@@ -375,7 +375,7 @@ mod tests {
         let toml_str = r#"
             [[snippets]]
             trigger = "/sig"
-            body = "Best,\nAlice"
+            body = "Best,\nUser"
 
             [[snippets]]
             trigger = "/ty"
@@ -392,7 +392,7 @@ mod tests {
             [bindings]
             A = "archive"
             "g s" = "/Sent"
-            G = { shell = "mbsync work", reindex = true }
+            G = { shell = "mbsync -a", reindex = true }
         "#;
         let cfg: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.bindings.global.len(), 3);
@@ -407,7 +407,7 @@ mod tests {
         assert!(matches!(
             cfg.bindings.global.get("G"),
             Some(BindingValue::Shell { shell, reindex: true, suspend: false })
-                if shell == "mbsync work"
+                if shell == "mbsync -a"
         ));
     }
 
@@ -456,14 +456,14 @@ mod tests {
 
             [[accounts]]
             name    = "work"
-            email   = "user@work.com"
-            maildir = "~/Maildir/work-mail"
+            email   = "user@example.com"
+            maildir = "~/Maildir/work"
 
             [accounts.smtp]
             host             = "smtp.example.com"
             port             = 465
             encryption       = "ssl"
-            username         = "user@work.com"
+            username         = "user@example.com"
             password_command = "pass email/work"
 
             [accounts.folders]
@@ -475,13 +475,13 @@ mod tests {
             spam    = "/Junk"
 
             [bindings]
-            G = { shell = "mbsync work", reindex = true }
+            G = { shell = "mbsync -a", reindex = true }
         "#;
         let cfg: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.accounts.len(), 1, "accounts should have 1 entry");
         assert_eq!(cfg.accounts[0].name, "work");
-        assert_eq!(cfg.accounts[0].email, "user@work.com");
-        assert_eq!(cfg.accounts[0].maildir, "~/Maildir/work-mail");
+        assert_eq!(cfg.accounts[0].email, "user@example.com");
+        assert_eq!(cfg.accounts[0].maildir, "~/Maildir/work");
         assert_eq!(cfg.accounts[0].smtp.host, "smtp.example.com");
         assert_eq!(cfg.accounts[0].folders.inbox, "/Inbox");
         assert_eq!(cfg.bindings.global.len(), 1);
@@ -496,14 +496,14 @@ mod tests {
 
             [[accounts]]
             name    = "work"
-            email   = "user@work.com"
-            maildir = "~/Maildir/work-mail"
+            email   = "user@example.com"
+            maildir = "~/Maildir/work"
 
             [accounts.smtp]
             host             = "smtp.example.com"
             port             = 465
             encryption       = "ssl"
-            username         = "user@work.com"
+            username         = "user@example.com"
             password_command = "pass email/work"
 
             [accounts.folders]
@@ -516,7 +516,7 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.accounts.len(), 1, "accounts should have 1 entry");
-        assert_eq!(cfg.accounts[0].maildir, "~/Maildir/work-mail");
+        assert_eq!(cfg.accounts[0].maildir, "~/Maildir/work");
         assert!(cfg.bindings.global.is_empty());
     }
 

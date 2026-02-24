@@ -131,8 +131,8 @@ mod tests {
     #[test]
     fn should_search_multi_term() {
         // First term is fine, but active term (last) is too short
-        assert!(!should_search("from:alice to:da"));
-        assert!(should_search("from:alice to:dan"));
+        assert!(!should_search("from:alice to:al"));
+        assert!(should_search("from:alice to:aln"));
     }
 
     #[test]

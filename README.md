@@ -349,7 +349,7 @@ section of your config file. Values can be:
 
 ```toml
 [bindings]
-G         = { shell = "mbsync work", reindex = true }
+G         = { shell = "mbsync -a", reindex = true }
 "ctrl+t"  = { shell = "tig", suspend = true }
 "g s"     = "/Sent"
 A         = "archive"

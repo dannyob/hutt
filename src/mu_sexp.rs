@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn test_parse_real_mu_headers_response() {
         // Actual sexp from mu server (captured from test run)
-        let sexp = r#"(:headers ((:path "/mail/Trash/cur/123:2,S" :size 75490 :changed (27030 44466 0) :date (27028 6999 0) :flags (seen list) :from ((:email "news@example.com" :name "Example Sender")) :list "" :message-id "01KHN8NJDKVYWPGK8D09A8RK73@example.com" :priority normal :subject "Get better slow motion footage" :to ((:email "a@work.com" :name "Test User")) :maildir "/Trash" :docid 14 :meta (:path "2:z" :level 0 :date "n69941b57" :data-tstamp (0 0 0) :root t :thread-subject t))))"#;
+        let sexp = r#"(:headers ((:path "/mail/Trash/cur/123:2,S" :size 75490 :changed (27030 44466 0) :date (27028 6999 0) :flags (seen list) :from ((:email "sender@example.com" :name "Example Sender")) :list "" :message-id "test-msg-id@example.com" :priority normal :subject "Get better slow motion footage" :to ((:email "user@example.com" :name "Test User")) :maildir "/Trash" :docid 14 :meta (:path "2:z" :level 0 :date "n69941b57" :data-tstamp (0 0 0) :root t :thread-subject t))))"#;
 
         let value = parse_sexp(sexp).unwrap();
         let envelopes = parse_find_response(&value).unwrap();
