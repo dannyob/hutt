@@ -10,7 +10,7 @@ use super::folder_picker::centered_rect;
 pub struct HelpOverlay {
     pub scroll: u16,
     /// (section_title, [(key_string, description)])
-    pub sections: Vec<(&'static str, Vec<(String, &'static str)>)>,
+    pub sections: Vec<(String, Vec<(String, String)>)>,
     /// Custom bindings not in standard sections: (key_string, description)
     pub extras: Vec<(String, String)>,
 }
