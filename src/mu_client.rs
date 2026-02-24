@@ -231,6 +231,18 @@ impl MuClient {
 
     /// Run a find query and collect all envelope results.
     pub async fn find(&mut self, query: &str, opts: &FindOpts) -> Result<Vec<Envelope>> {
+        let (envelopes, _) = self.find_capturing(query, opts).await?;
+        Ok(envelopes)
+    }
+
+    /// Run a find query and collect envelopes plus individual raw sexp strings.
+    /// Each string in the returned Vec is one envelope's sexp plist (re-serialized
+    /// from the parsed Value — semantically identical to mu's output).
+    pub async fn find_capturing(
+        &mut self,
+        query: &str,
+        opts: &FindOpts,
+    ) -> Result<(Vec<Envelope>, Vec<String>)> {
         let mut cmd = format!(
             "(find :query \"{}\" :sortfield :{} :maxnum {}",
             escape_string(query),
@@ -251,6 +263,7 @@ impl MuClient {
         self.send(&cmd).await?;
 
         let mut envelopes = Vec::new();
+        let mut raw_sexps = Vec::new();
         loop {
             let value = self.reader.next_frame().await?;
             if mu_sexp::is_erase(&value) {
@@ -262,11 +275,21 @@ impl MuClient {
             if mu_sexp::is_found(&value).is_some() {
                 break;
             }
-            // This should be a :headers response
-            let mut batch = mu_sexp::parse_find_response(&value)?;
-            envelopes.append(&mut batch);
+            // Extract individual envelopes from :headers list
+            if let Some(headers) = mu_sexp::plist_get(&value, "headers") {
+                if let Some(cons) = headers.as_cons() {
+                    for pair in cons.iter() {
+                        let env_value = pair.car();
+                        raw_sexps.push(env_value.to_string());
+                        match mu_sexp::parse_envelope(env_value) {
+                            Ok(env) => envelopes.push(env),
+                            Err(e) => mu_log!("find_capturing: skip envelope: {}", e),
+                        }
+                    }
+                }
+            }
         }
-        Ok(envelopes)
+        Ok((envelopes, raw_sexps))
     }
 
     /// Run a find query and return envelopes plus the total match count.
