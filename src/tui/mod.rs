@@ -30,7 +30,7 @@ use crate::compose;
 use crate::config::Config;
 use crate::envelope::{flags_from_string, group_into_conversations, Conversation, Envelope};
 use crate::keymap::{Action, InputMode, KeyMapper};
-use crate::links::{self, HuttUrl, IpcCommand, IpcListener};
+use crate::links::{self, HuttUrl, IpcCommand, IpcListener, IpcResponse};
 use crate::mime_render::{self, RenderCache};
 use crate::mu_client::{FindOpts, MuClient};
 use crate::send;
@@ -1773,7 +1773,7 @@ impl App {
         Ok(())
     }
 
-    async fn handle_ipc_command(&mut self, cmd: IpcCommand) -> Result<()> {
+    async fn handle_ipc_command(&mut self, cmd: IpcCommand) -> Result<IpcResponse> {
         debug_log!("handle_ipc_command: {:?}", cmd);
         match cmd {
             IpcCommand::Open(url_serde) => {
@@ -1791,6 +1791,7 @@ impl App {
                             Err(e) => debug_log!("IPC Message: load error: {}", e),
                         }
                         self.set_status(format!("Opened message {}", id));
+                        Ok(IpcResponse::Ok)
                     }
                     HuttUrl::Thread { id, account } => {
                         self.switch_to_account_if_needed(&account).await?;
@@ -1816,6 +1817,7 @@ impl App {
                             debug_log!("IPC Thread: message not found");
                             self.set_status(format!("Message not found: {}", id));
                         }
+                        Ok(IpcResponse::Ok)
                     }
                     HuttUrl::Search { query, account } => {
                         self.switch_to_account_if_needed(&account).await?;
@@ -1828,6 +1830,7 @@ impl App {
                             Err(e) => debug_log!("IPC Search: load error: {}", e),
                         }
                         self.set_status(format!("Search: {}", query));
+                        Ok(IpcResponse::Ok)
                     }
                     HuttUrl::Compose { to, subject, account } => {
                         self.switch_to_account_if_needed(&account).await?;
@@ -1840,6 +1843,7 @@ impl App {
                         self.compose_pending =
                             Some(compose::ComposePending::Ready(ctx));
                         self.set_status("Compose from URL");
+                        Ok(IpcResponse::Ok)
                     }
                 }
             }
@@ -1852,12 +1856,13 @@ impl App {
                     Ok(()) => debug_log!("IPC Navigate: loaded {} envelopes", self.envelopes.len()),
                     Err(e) => debug_log!("IPC Navigate: error: {}", e),
                 }
+                Ok(IpcResponse::Ok)
             }
             IpcCommand::Quit => {
                 self.should_quit = true;
+                Ok(IpcResponse::Ok)
             }
         }
-        Ok(())
     }
 
     // ── Action dispatch ─────────────────────────────────────────────
@@ -2665,7 +2670,7 @@ pub async fn run(mut app: App) -> Result<()> {
     let (shell_tx, mut shell_rx) = tokio::sync::mpsc::unbounded_channel();
     app.shell_tx = shell_tx;
 
-    let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<IpcCommand>();
+    let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<(IpcCommand, tokio::net::UnixStream)>();
     let _ipc_guard = match IpcListener::bind() {
         Ok(listener) => {
             let tx = ipc_tx;
@@ -2673,9 +2678,9 @@ pub async fn run(mut app: App) -> Result<()> {
                 debug_log!("IPC listener started");
                 loop {
                     match listener.accept().await {
-                        Ok(cmd) => {
+                        Ok((cmd, stream)) => {
                             debug_log!("IPC accepted: {:?}", cmd);
-                            if tx.send(cmd).is_err() {
+                            if tx.send((cmd, stream)).is_err() {
                                 debug_log!("IPC channel closed, exiting");
                                 break;
                             }
@@ -3186,10 +3191,17 @@ pub async fn run(mut app: App) -> Result<()> {
         }
 
         // Drain any pending IPC commands before blocking on input
-        while let Ok(cmd) = ipc_rx.try_recv() {
+        while let Ok((cmd, mut stream)) = ipc_rx.try_recv() {
             debug_log!("IPC drain: {:?}", cmd);
-            if let Err(e) = app.handle_ipc_command(cmd).await {
-                app.set_status(format!("IPC error: {}", e));
+            let resp = match app.handle_ipc_command(cmd).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    app.set_status(format!("IPC error: {}", e));
+                    IpcResponse::Error { message: e.to_string() }
+                }
+            };
+            if let Err(e) = links::send_response(&mut stream, &resp).await {
+                debug_log!("IPC response error: {}", e);
             }
         }
 
@@ -3238,10 +3250,17 @@ pub async fn run(mut app: App) -> Result<()> {
         let event = tokio::select! {
             ev = event_stream.next() => ev.and_then(|r| r.ok()),
             cmd = ipc_rx.recv() => {
-                if let Some(cmd) = cmd {
+                if let Some((cmd, mut stream)) = cmd {
                     debug_log!("IPC select: {:?}", cmd);
-                    if let Err(e) = app.handle_ipc_command(cmd).await {
-                        app.set_status(format!("IPC error: {}", e));
+                    let resp = match app.handle_ipc_command(cmd).await {
+                        Ok(resp) => resp,
+                        Err(e) => {
+                            app.set_status(format!("IPC error: {}", e));
+                            IpcResponse::Error { message: e.to_string() }
+                        }
+                    };
+                    if let Err(e) = links::send_response(&mut stream, &resp).await {
+                        debug_log!("IPC response error: {}", e);
                     }
                 }
                 continue;
