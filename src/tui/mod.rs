@@ -1470,6 +1470,20 @@ impl App {
         }
     }
 
+    fn select_from_here(&mut self) {
+        if self.conversations_mode {
+            for convo in self.conversations.iter().skip(self.selected) {
+                for docid in convo.all_docids() {
+                    self.selected_set.insert(docid);
+                }
+            }
+        } else {
+            for e in self.envelopes.iter().skip(self.selected) {
+                self.selected_set.insert(e.docid);
+            }
+        }
+    }
+
     // ── Compose helpers ─────────────────────────────────────────────
 
     fn build_compose_context(
@@ -1766,6 +1780,16 @@ impl App {
                 let (path, _) = self.resolve_move_target("spam");
                 self.navigate_folder(&path).await?;
             }
+            Action::GoStarred => {
+                self.current_folder = "flag:flagged".to_string();
+                self.load_folder().await?;
+                self.set_status("Starred");
+            }
+            Action::GoAllMail => {
+                self.current_folder = "\"\"".to_string();
+                self.load_folder().await?;
+                self.set_status("All Mail");
+            }
             Action::GoFolderPicker => {
                 self.folder_filter.clear();
                 self.folder_selected = 0;
@@ -1799,6 +1823,11 @@ impl App {
                         self.active_account - 1
                     };
                     self.switch_account(prev).await?;
+                }
+            }
+            Action::SwitchAccount(idx) => {
+                if idx < self.config.accounts.len() && idx != self.active_account {
+                    self.switch_account(idx).await?;
                 }
             }
 
@@ -1839,6 +1868,12 @@ impl App {
             }
             Action::SelectAll => {
                 self.select_all();
+            }
+            Action::SelectFromHere => {
+                self.select_from_here();
+            }
+            Action::ClearSelection => {
+                self.selected_set.clear();
             }
             Action::SelectDown => {
                 self.toggle_select();

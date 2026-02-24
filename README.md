@@ -267,6 +267,8 @@ to open the command palette and fuzzy-search any action.
 | `ga`           | Go to Archive       |
 | `gd`           | Go to Drafts        |
 | `gt`           | Go to Sent          |
+| `gs`           | Go to Starred       |
+| `g*`           | Go to All Mail      |
 | `g#`           | Go to Trash         |
 | `g!`           | Go to Spam          |
 | `gl`           | Folder picker       |
@@ -275,6 +277,7 @@ to open the command palette and fuzzy-search any action.
 | `gA`           | Account picker      |
 | `gTab`         | Next account        |
 | `gShift+Tab`   | Previous account    |
+| `Ctrl+1-9`     | Switch to account N |
 
 ### Search & Filters
 
@@ -291,6 +294,7 @@ to open the command palette and fuzzy-search any action.
 |------------------|--------------------------|
 | `x`              | Toggle select            |
 | `Cmd+a` / `Ctrl+a` | Select all (toggle)   |
+| `Esc`            | Clear selection          |
 | `J`              | Select + move down       |
 | `K`              | Select + move up         |
 
@@ -301,11 +305,11 @@ selection is active.
 
 | Key          | Action               |
 |--------------|----------------------|
-| `Enter`      | Open thread          |
-| `j` / `k`    | Navigate messages    |
-| `o`          | Toggle expand        |
-| `O`          | Expand/collapse all  |
-| `q` / `Esc`  | Close thread         |
+| `Enter`          | Open thread          |
+| `j`/`k`/`n`/`p` | Navigate messages    |
+| `o`              | Toggle expand        |
+| `O`              | Expand/collapse all  |
+| `q` / `Esc`      | Close thread         |
 
 Triage and compose keys work in thread view too.
 

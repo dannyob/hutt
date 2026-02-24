@@ -46,6 +46,8 @@ pub enum Action {
     GoSent,
     GoTrash,
     GoSpam,
+    GoStarred,
+    GoAllMail,
     GoFolderPicker,
 
     // Folder cycling
@@ -55,6 +57,7 @@ pub enum Action {
     // Account switching
     NextAccount,
     PrevAccount,
+    SwitchAccount(usize),
 
     // Search & Filters
     EnterSearch,
@@ -65,6 +68,8 @@ pub enum Action {
     // Multi-select
     ToggleSelect,
     SelectAll,
+    SelectFromHere,
+    ClearSelection,
     SelectDown,
     SelectUp,
 
@@ -274,6 +279,8 @@ pub fn parse_action_name(name: &str) -> Result<Action, String> {
         "go_sent" => Ok(Action::GoSent),
         "go_trash" => Ok(Action::GoTrash),
         "go_spam" => Ok(Action::GoSpam),
+        "go_starred" => Ok(Action::GoStarred),
+        "go_all_mail" | "go_all" => Ok(Action::GoAllMail),
         "go_folder_picker" => Ok(Action::GoFolderPicker),
         "next_folder" => Ok(Action::NextFolder),
         "prev_folder" => Ok(Action::PrevFolder),
@@ -285,6 +292,8 @@ pub fn parse_action_name(name: &str) -> Result<Action, String> {
         "filter_needs_reply" => Ok(Action::FilterNeedsReply),
         "toggle_select" => Ok(Action::ToggleSelect),
         "select_all" => Ok(Action::SelectAll),
+        "select_from_here" => Ok(Action::SelectFromHere),
+        "clear_selection" => Ok(Action::ClearSelection),
         "select_down" => Ok(Action::SelectDown),
         "select_up" => Ok(Action::SelectUp),
         "open_thread" => Ok(Action::OpenThread),
@@ -543,6 +552,7 @@ impl KeyMapper {
             (KeyCode::Char('x'), KeyModifiers::NONE) => Action::ToggleSelect,
             (KeyCode::Char('a'), KeyModifiers::SUPER) => Action::SelectAll,
             (KeyCode::Char('a'), KeyModifiers::CONTROL) => Action::SelectAll,
+            (KeyCode::Esc, _) => Action::ClearSelection,
             (KeyCode::Char('J'), KeyModifiers::SHIFT) => Action::SelectDown,
             (KeyCode::Char('K'), KeyModifiers::SHIFT) => Action::SelectUp,
 
@@ -581,6 +591,11 @@ impl KeyMapper {
             // Help
             (KeyCode::Char('?'), _) => Action::ShowHelp,
 
+            // Account switching by number (Ctrl+1-9)
+            (KeyCode::Char(c @ '1'..='9'), KeyModifiers::CONTROL) => {
+                Action::SwitchAccount((c as usize) - ('1' as usize))
+            }
+
             // Folder cycling
             (KeyCode::Tab, _) => Action::NextFolder,
             (KeyCode::BackTab, _) => Action::PrevFolder,
@@ -602,8 +617,10 @@ impl KeyMapper {
             (KeyCode::Char('g'), KeyCode::Char('a')) => Action::GoArchive,
             (KeyCode::Char('g'), KeyCode::Char('d')) => Action::GoDrafts,
             (KeyCode::Char('g'), KeyCode::Char('t')) => Action::GoSent,
+            (KeyCode::Char('g'), KeyCode::Char('s')) => Action::GoStarred,
             (KeyCode::Char('g'), KeyCode::Char('#')) => Action::GoTrash,
             (KeyCode::Char('g'), KeyCode::Char('!')) => Action::GoSpam,
+            (KeyCode::Char('g'), KeyCode::Char('*')) => Action::GoAllMail,
             (KeyCode::Char('g'), KeyCode::Char('l')) => Action::GoFolderPicker,
             // g-prefix account switching
             (KeyCode::Char('g'), KeyCode::Char('A')) => Action::OpenAccountPicker,
