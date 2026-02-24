@@ -214,8 +214,33 @@ pub struct SmartFolderPopup<'a> {
 
 impl<'a> Widget for SmartFolderPopup<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let popup_width: u16 = 50;
-        let popup_height: u16 = 14;
+        let label_len: u16 = 7; // "Query: " or "Name:  "
+        let max_width = (area.width * 80 / 100).max(40);
+
+        // Compute how wide the popup needs to be for the query/name content
+        let content_len = self.query.len().max(self.name.len()) as u16 + label_len + 2; // +2 for cursor + padding
+        let popup_width = content_len.clamp(60, max_width);
+
+        // Inner content width for wrapping calculations
+        let inner_width = popup_width.saturating_sub(2); // borders
+        let query_field_width = inner_width.saturating_sub(label_len) as usize;
+
+        // Word-wrap the query to calculate how many lines it needs
+        let query_lines = wrap_text(self.query, query_field_width);
+        let query_line_count = query_lines.len().max(1) as u16;
+
+        // Height: query lines + name line + separator + preview (up to 6) + hint + borders
+        let preview_lines = if self.count.is_some() {
+            1 + self.preview.len().min(5) as u16
+        } else if !self.query.is_empty() {
+            1
+        } else {
+            0
+        };
+        let name_line: u16 = if self.phase == 1 { 1 } else { 0 };
+        let content_height = query_line_count + name_line + 1 /* sep */ + preview_lines + 1 /* hint */;
+        let popup_height = (content_height + 2 /* borders */).clamp(8, area.height.saturating_sub(4));
+
         let popup = centered_rect(popup_width, popup_height, area);
 
         Clear.render(popup, buf);
@@ -253,45 +278,57 @@ impl<'a> Widget for SmartFolderPopup<'a> {
 
         let mut y = inner.y;
 
-        // Query field
+        // Query field — word-wrapped
         buf.set_string(inner.x, y, "Query: ", label_style);
-        let query_display = truncate_str(self.query, (inner.width as usize).saturating_sub(8));
-        buf.set_string(inner.x + 7, y, &query_display, text_style);
+        for line in &query_lines {
+            if y >= inner.y + inner.height {
+                break;
+            }
+            let x_offset = label_len; // continuation lines align with first
+            buf.set_string(inner.x + x_offset, y, line, text_style);
+            y += 1;
+        }
         if self.phase == 0 {
-            let cx = inner.x + 7 + self.query.len().min(inner.width as usize - 8) as u16;
-            if cx < inner.x + inner.width {
-                buf.set_string(cx, y, " ", cursor_style);
+            // Cursor at end of last query line
+            let last_line = query_lines.last().map(|s| s.len()).unwrap_or(0);
+            let cursor_y = (inner.y + query_line_count).saturating_sub(1);
+            let cx = inner.x + label_len + last_line as u16;
+            if cx < inner.x + inner.width && cursor_y < inner.y + inner.height {
+                buf.set_string(cx, cursor_y, " ", cursor_style);
             }
         }
-        y += 1;
 
         // Name field (only visible in phase 1)
-        if self.phase == 1 {
+        if self.phase == 1 && y < inner.y + inner.height {
             buf.set_string(inner.x, y, "Name:  ", label_style);
-            let name_display = truncate_str(self.name, (inner.width as usize).saturating_sub(8));
-            buf.set_string(inner.x + 7, y, &name_display, text_style);
-            let cx = inner.x + 7 + self.name.len().min(inner.width as usize - 8) as u16;
+            let name_display = truncate_str(self.name, query_field_width);
+            buf.set_string(inner.x + label_len, y, &name_display, text_style);
+            let cx = inner.x + label_len + self.name.len().min(query_field_width) as u16;
             if cx < inner.x + inner.width {
                 buf.set_string(cx, y, " ", cursor_style);
             }
+            y += 1;
         }
-        y += 1;
 
         // Separator
-        let sep: String = "\u{2500}".repeat(inner.width as usize);
-        buf.set_string(inner.x, y, &sep, Style::default().fg(Color::DarkGray));
-        y += 1;
+        if y < inner.y + inner.height {
+            let sep: String = "\u{2500}".repeat(inner.width as usize);
+            buf.set_string(inner.x, y, &sep, Style::default().fg(Color::DarkGray));
+            y += 1;
+        }
 
         // Preview results
         if let Some(count) = self.count {
-            let count_text = format!("{} result{} found", count, if count == 1 { "" } else { "s" });
-            buf.set_string(
-                inner.x,
-                y,
-                &count_text,
-                Style::default().fg(Color::Yellow),
-            );
-            y += 1;
+            if y < inner.y + inner.height {
+                let count_text = format!("{} result{} found", count, if count == 1 { "" } else { "s" });
+                buf.set_string(
+                    inner.x,
+                    y,
+                    &count_text,
+                    Style::default().fg(Color::Yellow),
+                );
+                y += 1;
+            }
 
             for subject in self.preview.iter().take(5) {
                 if y >= inner.y + inner.height {
@@ -301,7 +338,7 @@ impl<'a> Widget for SmartFolderPopup<'a> {
                 buf.set_string(inner.x + 1, y, &display, Style::default().fg(Color::DarkGray));
                 y += 1;
             }
-        } else if !self.query.is_empty() {
+        } else if !self.query.is_empty() && y < inner.y + inner.height {
             buf.set_string(
                 inner.x,
                 y,
@@ -320,6 +357,34 @@ impl<'a> Widget for SmartFolderPopup<'a> {
         let hint_x = popup.x + 1;
         buf.set_string(hint_x, hint_y, hint, Style::default().fg(Color::DarkGray));
     }
+}
+
+/// Word-wrap text to fit within a given width, breaking at spaces.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    if text.len() <= width {
+        return vec![text.to_string()];
+    }
+
+    let mut lines = Vec::new();
+    let mut remaining = text;
+
+    while remaining.len() > width {
+        // Find the last space within the width
+        let break_at = remaining[..width]
+            .rfind(' ')
+            .map(|i| i + 1) // break after the space
+            .unwrap_or(width); // hard-break if no space found
+
+        lines.push(remaining[..break_at].trim_end().to_string());
+        remaining = &remaining[break_at..];
+    }
+    if !remaining.is_empty() {
+        lines.push(remaining.to_string());
+    }
+    lines
 }
 
 // ---------------------------------------------------------------------------
@@ -400,5 +465,40 @@ fn truncate_str(s: &str, max_width: usize) -> String {
         let mut result: String = chars[..max_width - 1].iter().collect();
         result.push('\u{2026}');
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_short_text() {
+        assert_eq!(wrap_text("hello world", 40), vec!["hello world"]);
+    }
+
+    #[test]
+    fn wrap_at_space() {
+        assert_eq!(
+            wrap_text("from:a@example.com or from:b@example.com or from:c@example.com", 30),
+            vec![
+                "from:a@example.com or",
+                "from:b@example.com or",
+                "from:c@example.com",
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_no_space_hard_break() {
+        assert_eq!(
+            wrap_text("abcdefghij", 5),
+            vec!["abcde", "fghij"]
+        );
+    }
+
+    #[test]
+    fn wrap_empty() {
+        assert_eq!(wrap_text("", 40), vec![""]);
     }
 }
