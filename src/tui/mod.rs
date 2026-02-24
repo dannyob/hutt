@@ -71,6 +71,12 @@ fn debug_log_path() -> Option<&'static str> {
 
 // ── Tab bar types ───────────────────────────────────────────────────
 
+pub struct PrefetchItem {
+    pub account_idx: usize,
+    pub folder: String,
+    pub query: String,
+}
+
 pub struct TabRegion {
     pub x_start: u16,
     pub x_end: u16,
@@ -220,15 +226,18 @@ pub struct App {
     pub tab_regions: Vec<TabRegion>,
     pub account_picker_selected: usize,
 
-    // Folder query cache: query string → envelopes. Invalidated on
-    // triage, reindex, and account switch. Avoids round-tripping to mu
-    // when switching between previously-visited folders or toggling filters.
-    pub folder_cache: HashMap<String, Vec<Envelope>>,
+    // Folder query cache: (account_index, query_string) → envelopes.
+    // Invalidated per-account on triage/reindex. Survives account switches
+    // so prefetched results for other accounts are ready immediately.
+    pub folder_cache: HashMap<(usize, String), Vec<Envelope>>,
     // When true, collect_known_folders() will rescan the maildir tree.
     // Set on reindex and account switch; cleared after scan.
     pub known_folders_dirty: bool,
-    // Queue of (folder_name, query_string) pairs to prefetch during idle time.
-    pub prefetch_queue: Vec<(String, String)>,
+    // Queue of prefetch items to run during idle time.
+    pub prefetch_queue: Vec<PrefetchItem>,
+    // Background mu servers for non-active accounts (read-only prefetch).
+    // On account switch, we swap rather than quit/restart.
+    pub background_mu: HashMap<usize, MuClient>,
 
     // List/preview split (percentage for list pane, 10..90)
     pub list_pct: u16,
@@ -308,54 +317,156 @@ impl App {
         }
     }
 
-    /// Queue prefetch for adjacent tabs not already in the cache.
-    /// Called after load_folder() completes.
-    fn queue_prefetch(&mut self) {
-        self.prefetch_queue.clear();
-        if self.tabs.is_empty() {
-            return;
+    /// Build an ordered tab list for an account: neighbors of `center` expanding outward.
+    /// If `center` is None (other account), starts with inbox then expands.
+    fn tabs_for_account(&self, account_idx: usize, center: Option<&str>) -> Vec<String> {
+        let account = match self.config.accounts.get(account_idx) {
+            Some(a) => a,
+            None => return Vec::new(),
+        };
+        let folder_list: Vec<String> = vec![
+            account.folders.inbox.clone(),
+            account.folders.archive.clone(),
+            account.folders.drafts.clone(),
+            account.folders.sent.clone(),
+            account.folders.trash.clone(),
+            account.folders.spam.clone(),
+        ];
+        // For non-active accounts we don't have live splits/smart folders,
+        // so just use config-defined tabs with empty wildcard expansions.
+        let (split_names, smart_names) = if account_idx == self.active_account {
+            (
+                self.splits.iter().map(|s| format!("#{}", s.name)).collect::<Vec<_>>(),
+                self.smart_folders.iter().map(|sf| format!("@{}", sf.name)).collect::<Vec<_>>(),
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let tabs = resolve_tabs(
+            account.tabs.as_deref(),
+            &folder_list,
+            &split_names,
+            &smart_names,
+        );
+        if tabs.is_empty() {
+            return Vec::new();
         }
-        // Find current tab index
-        let cur_idx = self.tabs.iter().position(|t| t == &self.current_folder);
 
-        // Build prefetch list: neighbors first, then remaining tabs
-        let mut to_prefetch: Vec<String> = Vec::new();
-        if let Some(idx) = cur_idx {
-            // Next tab, previous tab, then expanding outward
-            let len = self.tabs.len();
-            for delta in 1..len {
-                let next = (idx + delta) % len;
-                to_prefetch.push(self.tabs[next].clone());
-                if delta < len {
-                    let prev = (idx + len - delta) % len;
+        let mut ordered = Vec::new();
+        if let Some(center_folder) = center {
+            if let Some(idx) = tabs.iter().position(|t| t == center_folder) {
+                // Expanding outward from current position
+                for delta in 1..tabs.len() {
+                    let next = (idx + delta) % tabs.len();
+                    ordered.push(tabs[next].clone());
+                    let prev = (idx + tabs.len() - delta) % tabs.len();
                     if prev != next {
-                        to_prefetch.push(self.tabs[prev].clone());
+                        ordered.push(tabs[prev].clone());
                     }
                 }
+            } else {
+                ordered = tabs;
             }
         } else {
-            // Current folder not in tabs — prefetch all tabs
-            to_prefetch = self.tabs.clone();
+            // Other account: inbox first, then remaining
+            ordered = tabs;
+        }
+        ordered
+    }
+
+    /// Build a query string for a folder on a specific account.
+    fn query_for_account_folder(&self, account_idx: usize, folder: &str) -> String {
+        if account_idx == self.active_account {
+            return self.query_for_folder(folder);
+        }
+        // For non-active accounts, build basic maildir queries
+        if folder.starts_with('/') {
+            format!("maildir:{}", folder)
+        } else {
+            folder.to_string()
+        }
+    }
+
+    /// Queue prefetch for adjacent tabs, interleaved across all accounts.
+    /// Active account gets every other slot; other accounts' inboxes appear early.
+    fn queue_prefetch(&mut self) {
+        self.prefetch_queue.clear();
+
+        // Build per-account ordered folder lists
+        let active = self.active_account;
+        let active_folders = self.tabs_for_account(active, Some(&self.current_folder));
+        let mut other_folders: Vec<(usize, Vec<String>)> = Vec::new();
+        for idx in 0..self.config.accounts.len() {
+            if idx != active {
+                let folders = self.tabs_for_account(idx, None);
+                if !folders.is_empty() {
+                    other_folders.push((idx, folders));
+                }
+            }
         }
 
-        // Filter out already-cached folders
-        for folder in to_prefetch {
-            let query = self.query_for_folder(&folder);
-            if !self.folder_cache.contains_key(&query) {
-                self.prefetch_queue.push((folder, query));
+        // Interleave: active, other[0], active, other[1], active, other[0], ...
+        let mut active_iter = active_folders.into_iter();
+        let mut other_iters: Vec<(usize, std::vec::IntoIter<String>)> = other_folders
+            .into_iter()
+            .map(|(idx, v)| (idx, v.into_iter()))
+            .collect();
+        let mut other_round = 0;
+        let mut done = false;
+        while !done {
+            done = true;
+            // One from active account
+            if let Some(folder) = active_iter.next() {
+                let query = self.query_for_folder(&folder);
+                if !self.folder_cache.contains_key(&(active, query.clone())) {
+                    self.prefetch_queue.push(PrefetchItem {
+                        account_idx: active,
+                        folder,
+                        query,
+                    });
+                }
+                done = false;
+            }
+            // One from the next other account (round-robin)
+            if !other_iters.is_empty() {
+                let start = other_round % other_iters.len();
+                // Try each other account starting from current round-robin position
+                for i in 0..other_iters.len() {
+                    let pos = (start + i) % other_iters.len();
+                    let (acct_idx, ref mut iter) = other_iters[pos];
+                    if let Some(folder) = iter.next() {
+                        let query = self.query_for_account_folder(acct_idx, &folder);
+                        if !self.folder_cache.contains_key(&(acct_idx, query.clone())) {
+                            self.prefetch_queue.push(PrefetchItem {
+                                account_idx: acct_idx,
+                                folder,
+                                query,
+                            });
+                        }
+                        done = false;
+                        other_round = pos + 1;
+                        break;
+                    }
+                }
+                // Clean up exhausted iterators
+                other_iters.retain(|(_, iter)| iter.len() > 0);
             }
         }
         if !self.prefetch_queue.is_empty() {
-            debug_log!("prefetch: queued {} folders", self.prefetch_queue.len());
+            debug_log!("prefetch: queued {} items across {} accounts",
+                self.prefetch_queue.len(), 1 + self.config.accounts.len() - 1);
         }
     }
 
     /// Invalidate the folder query cache. Called after triage, reindex,
     /// and account switch — any event that changes mu's data.
     fn invalidate_folder_cache(&mut self) {
-        if !self.folder_cache.is_empty() {
-            debug_log!("invalidate_folder_cache: clearing {} entries", self.folder_cache.len());
-            self.folder_cache.clear();
+        let acct = self.active_account;
+        let before = self.folder_cache.len();
+        self.folder_cache.retain(|(idx, _), _| *idx != acct);
+        let removed = before - self.folder_cache.len();
+        if removed > 0 {
+            debug_log!("invalidate_folder_cache: cleared {} entries for account {}", removed, acct);
         }
         self.prefetch_queue.clear();
         self.known_folders_dirty = true;
@@ -523,6 +634,7 @@ impl App {
             folder_cache: HashMap::new(),
             known_folders_dirty: true,
             prefetch_queue: Vec::new(),
+            background_mu: HashMap::new(),
             list_pct: 35,
             dragging_border: false,
             help_scroll: 0,
@@ -543,7 +655,8 @@ impl App {
         self.current_query = query.clone();
 
         // Check folder cache before querying mu
-        if let Some(cached) = self.folder_cache.get(&query) {
+        let cache_key = (self.active_account, query.clone());
+        if let Some(cached) = self.folder_cache.get(&cache_key) {
             debug_log!("load_folder: cache HIT ({} envelopes)", cached.len());
             self.envelopes = cached.clone();
         } else {
@@ -555,7 +668,7 @@ impl App {
                 debug_log!("load_folder: split exclusion removed {} envelopes", before - self.envelopes.len());
             }
             debug_log!("load_folder: cache MISS, got {} envelopes from mu", self.envelopes.len());
-            self.folder_cache.insert(query, self.envelopes.clone());
+            self.folder_cache.insert(cache_key, self.envelopes.clone());
         }
 
         self.selected = 0;
@@ -612,11 +725,12 @@ impl App {
 
         // Invalidate cached inbox query since split exclusions changed.
         // Also invalidate cached split folder queries.
+        let acct = self.active_account;
         let inbox_query = format!("maildir:{}", inbox_folder);
-        self.folder_cache.remove(&inbox_query);
+        self.folder_cache.remove(&(acct, inbox_query));
         for split in &self.splits {
             let q = format!("maildir:{} AND ({})", inbox_folder, split.query);
-            self.folder_cache.remove(&q);
+            self.folder_cache.remove(&(acct, q));
         }
     }
 
@@ -993,28 +1107,29 @@ impl App {
             return Ok(());
         }
 
-        // Clear caches for the old account
-        self.invalidate_folder_cache();
+        let old_active = self.active_account;
 
-        // Quit current mu server
-        self.mu.quit().await?;
-
-        // Determine new muhome
-        let muhome = self.config.effective_muhome(index);
-
-        // Ensure mu database exists (may run mu init + index on first switch)
-        if let Some(account) = self.config.accounts.get(index) {
-            let account_name = account.name.clone();
-            let maildir = account.maildir.clone();
-            let db_dir = muhome.as_deref().map(|p| std::path::PathBuf::from(p).join("xapian"));
-            if db_dir.as_ref().is_some_and(|d| !d.is_dir()) {
-                self.set_status(format!("Initializing mu database for {}...", account_name));
+        // Swap mu servers: current primary → background, background → primary
+        if let Some(new_mu) = self.background_mu.remove(&index) {
+            debug_log!("switch_account: swapping mu servers (bg for account {})", index);
+            let old_mu = std::mem::replace(&mut self.mu, new_mu);
+            self.background_mu.insert(old_active, old_mu);
+        } else {
+            // No background server for this account — fall back to quit/restart
+            debug_log!("switch_account: no background server, doing quit/restart");
+            self.mu.quit().await?;
+            let muhome = self.config.effective_muhome(index);
+            if let Some(account) = self.config.accounts.get(index) {
+                let account_name = account.name.clone();
+                let maildir = account.maildir.clone();
+                let db_dir = muhome.as_deref().map(|p| std::path::PathBuf::from(p).join("xapian"));
+                if db_dir.as_ref().is_some_and(|d| !d.is_dir()) {
+                    self.set_status(format!("Initializing mu database for {}...", account_name));
+                }
+                crate::mu_client::ensure_mu_database(muhome.as_deref(), &maildir).await?;
             }
-            crate::mu_client::ensure_mu_database(muhome.as_deref(), &maildir).await?;
+            self.mu = MuClient::start(muhome.as_deref()).await?;
         }
-
-        // Start new mu server
-        self.mu = MuClient::start(muhome.as_deref()).await?;
 
         // Update active account
         self.active_account = index;
@@ -2189,6 +2304,25 @@ pub async fn run(mut app: App) -> Result<()> {
         app.load_folder().await?;
     }
 
+    // Spawn background mu servers for non-active accounts (for prefetch)
+    for idx in 0..app.config.accounts.len() {
+        if idx == app.active_account {
+            continue;
+        }
+        let muhome = app.config.effective_muhome(idx);
+        match MuClient::start(muhome.as_deref()).await {
+            Ok(client) => {
+                let name = app.config.accounts[idx].name.as_str();
+                debug_log!("background mu: started for account {} ({:?})", name, muhome);
+                app.background_mu.insert(idx, client);
+            }
+            Err(e) => {
+                let name = app.config.accounts.get(idx).map(|a| a.name.as_str()).unwrap_or("?");
+                debug_log!("background mu: failed for account {} ({}), prefetch unavailable", name, e);
+            }
+        }
+    }
+
     // Start IPC listener as a background task, sending commands through a channel
     // Create shell result channel — replace the dummy one from App::new
     let (shell_tx, mut shell_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2625,23 +2759,38 @@ pub async fn run(mut app: App) -> Result<()> {
         // during idle time. Each query is fast (~1-100ms) so input lag
         // is imperceptible. Skip if indexing (mu server is busy).
         if !app.prefetch_queue.is_empty() && !app.indexing {
-            let (folder, query) = app.prefetch_queue.remove(0);
-            if !app.folder_cache.contains_key(&query) {
-                debug_log!("prefetch: fetching {:?}", folder);
-                match app.mu.find(&query, &FindOpts::default()).await {
-                    Ok(mut envelopes) => {
-                        // Apply split exclusion for inbox queries
-                        let is_inbox = app.account()
-                            .map(|a| a.folders.inbox.as_str())
-                            .unwrap_or("/Inbox") == folder;
-                        if is_inbox && !app.split_excluded.is_empty() {
-                            envelopes.retain(|e| !app.split_excluded.contains(&e.docid));
+            let item = app.prefetch_queue.remove(0);
+            let cache_key = (item.account_idx, item.query.clone());
+            if !app.folder_cache.contains_key(&cache_key) {
+                // Pick the right mu server for this account
+                let mu_server = if item.account_idx == app.active_account {
+                    Some(&mut app.mu)
+                } else {
+                    app.background_mu.get_mut(&item.account_idx)
+                };
+                if let Some(mu) = mu_server {
+                    debug_log!("prefetch: [{}] fetching {:?}",
+                        app.config.accounts.get(item.account_idx).map(|a| a.name.as_str()).unwrap_or("?"),
+                        item.folder);
+                    match mu.find(&item.query, &FindOpts::default()).await {
+                        Ok(mut envelopes) => {
+                            // Apply split exclusion for active account inbox
+                            if item.account_idx == app.active_account {
+                                let is_inbox = app.account()
+                                    .map(|a| a.folders.inbox.as_str())
+                                    .unwrap_or("/Inbox") == item.folder;
+                                if is_inbox && !app.split_excluded.is_empty() {
+                                    envelopes.retain(|e| !app.split_excluded.contains(&e.docid));
+                                }
+                            }
+                            debug_log!("prefetch: [{}] cached {:?} ({} envelopes)",
+                                app.config.accounts.get(item.account_idx).map(|a| a.name.as_str()).unwrap_or("?"),
+                                item.folder, envelopes.len());
+                            app.folder_cache.insert(cache_key, envelopes);
                         }
-                        debug_log!("prefetch: cached {:?} ({} envelopes)", folder, envelopes.len());
-                        app.folder_cache.insert(query, envelopes);
-                    }
-                    Err(e) => {
-                        debug_log!("prefetch: error for {:?}: {}", folder, e);
+                        Err(e) => {
+                            debug_log!("prefetch: error for {:?}: {}", item.folder, e);
+                        }
                     }
                 }
             }
@@ -2900,6 +3049,9 @@ pub async fn run(mut app: App) -> Result<()> {
     io::stdout().execute(crossterm::event::DisableMouseCapture)?;
     terminal::disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
+    for (_, mut bg) in app.background_mu.drain() {
+        let _ = bg.quit().await;
+    }
     app.mu.quit().await?;
     Ok(())
 }
