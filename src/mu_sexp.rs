@@ -59,6 +59,18 @@ pub fn read_frame(buf: &[u8]) -> Result<Option<(Value, usize)>> {
     Ok(Some((value, data_end)))
 }
 
+/// Encode an S-expression string into mu's wire frame format.
+/// Format: \xfe<hex-length>\xff<sexp-bytes>
+pub fn encode_frame(sexp: &str) -> Vec<u8> {
+    let len_hex = format!("{:x}", sexp.len());
+    let mut buf = Vec::with_capacity(2 + len_hex.len() + sexp.len());
+    buf.push(0xfe);
+    buf.extend_from_slice(len_hex.as_bytes());
+    buf.push(0xff);
+    buf.extend_from_slice(sexp.as_bytes());
+    buf
+}
+
 fn truncate(s: &str, max: usize) -> &str {
     if s.len() <= max {
         s
@@ -379,6 +391,15 @@ mod tests {
     fn test_is_erase() {
         let value = parse_sexp("(:erase t)").unwrap();
         assert!(is_erase(&value));
+    }
+
+    #[test]
+    fn test_encode_frame_roundtrip() {
+        let sexp = "(:pong \"mu\")";
+        let encoded = encode_frame(sexp);
+        let (value, consumed) = read_frame(&encoded).unwrap().unwrap();
+        assert_eq!(consumed, encoded.len());
+        assert!(is_pong(&value));
     }
 
     #[test]
