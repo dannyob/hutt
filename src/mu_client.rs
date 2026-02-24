@@ -82,7 +82,7 @@ impl Default for FindOpts {
             threads: true,
             sort_field: "date".to_string(),
             descending: true,
-            max_num: 500,
+            max_num: 10000,
             include_related: false,
         }
     }
