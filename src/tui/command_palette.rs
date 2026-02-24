@@ -360,7 +360,7 @@ impl<'a> Widget for CommandPalette<'a> {
         // Popup dimensions: 60 chars wide, min(entries.len()*2 + 4, 20) tall
         // Each entry takes 2 lines (name + description), plus border and filter
         let popup_width: u16 = 60;
-        let popup_height: u16 = ((filtered.len() * 2 + 4) as u16).min(20).max(6);
+        let popup_height: u16 = ((filtered.len() * 2 + 4) as u16).clamp(6, 20);
 
         let popup = centered_rect(popup_width, popup_height, area);
 

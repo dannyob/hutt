@@ -148,7 +148,7 @@ impl Envelope {
     }
 
     /// Short form for the envelope list (name only, falls back to email).
-    pub fn from_display(&self) -> String {
+    pub fn sender_display(&self) -> String {
         self.from
             .first()
             .map(|a| a.short_display())
@@ -202,7 +202,7 @@ impl Conversation {
         let mut seen = std::collections::HashSet::new();
         let mut names = Vec::new();
         for msg in &self.messages {
-            let name = msg.from_display();
+            let name = msg.sender_display();
             if seen.insert(name.clone()) {
                 names.push(name);
             }

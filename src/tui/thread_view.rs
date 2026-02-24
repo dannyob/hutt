@@ -59,7 +59,7 @@ impl<'a> Widget for ThreadView<'a> {
             let is_selected = idx == self.selected;
 
             // Build header line: From | Date | expand indicator
-            let from = msg.envelope.from_display();
+            let from = msg.envelope.sender_display();
             let date = msg.envelope.date_display();
             let expand_indicator = if msg.expanded { "[-]" } else { "[+]" };
 

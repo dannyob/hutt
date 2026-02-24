@@ -120,7 +120,7 @@ pub struct HelpOverlay {
 impl Widget for HelpOverlay {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let popup_width: u16 = 56;
-        let popup_height: u16 = area.height.min(30).max(10);
+        let popup_height: u16 = area.height.clamp(10, 30);
         let popup = centered_rect(popup_width, popup_height, area);
 
         Clear.render(popup, buf);
