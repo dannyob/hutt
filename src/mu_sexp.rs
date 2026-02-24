@@ -320,6 +320,127 @@ pub fn is_update(value: &Value) -> bool {
     plist_get(value, "update").is_some()
 }
 
+/// Convert a mu sexp plist string to a JSON value.
+///
+/// Special handling:
+/// - :date / :changed keys: Emacs time triple → ISO 8601 string
+/// - Plist keyword-value pairs → JSON object
+/// - Symbol lists (flags) → JSON string arrays
+/// - t / nil → true / false
+/// - Nested plists and lists of plists → nested objects/arrays
+pub fn sexp_to_json(sexp: &str) -> Result<serde_json::Value> {
+    let value = parse_sexp(sexp)?;
+    Ok(value_to_json(&value, None))
+}
+
+/// Recursive conversion of a lexpr Value to serde_json::Value.
+/// parent_key is used for context-sensitive conversion (e.g. :date).
+fn value_to_json(value: &Value, parent_key: Option<&str>) -> serde_json::Value {
+    // Nil
+    if value.is_nil() {
+        return serde_json::Value::Null;
+    }
+
+    // String
+    if let Some(s) = value.as_str() {
+        return serde_json::Value::String(s.to_string());
+    }
+
+    // Integer
+    if let Some(n) = value.as_i64() {
+        return serde_json::json!(n);
+    }
+
+    // Float
+    if let Some(n) = value.as_f64() {
+        return serde_json::json!(n);
+    }
+
+    // Symbol: t → true, nil → false, others → string
+    if let Some(sym) = value.as_symbol() {
+        return match sym {
+            "t" => serde_json::Value::Bool(true),
+            "nil" => serde_json::Value::Bool(false),
+            _ => serde_json::Value::String(sym.to_string()),
+        };
+    }
+
+    // Bare keyword
+    if let Some(kw) = value.as_keyword() {
+        return serde_json::Value::String(format!(":{}", kw));
+    }
+
+    // Cons cell (list)
+    if let Some(cons) = value.as_cons() {
+        let items: Vec<&Value> = cons.iter().map(|pair| pair.car()).collect();
+        if items.is_empty() {
+            return serde_json::Value::Array(vec![]);
+        }
+
+        // Plist: first element is a keyword
+        if items[0].is_keyword() {
+            return plist_to_json(&items);
+        }
+
+        // Emacs time triple under :date or :changed key
+        if matches!(parent_key, Some("date") | Some("changed") | Some("data-tstamp")) {
+            if let Some(dt) = parse_emacs_time(value) {
+                return serde_json::Value::String(dt.to_rfc3339());
+            }
+        }
+
+        // List of plists: first element is itself a cons starting with keyword
+        if items[0].as_cons().is_some() {
+            let first_items: Vec<&Value> = items[0]
+                .as_cons()
+                .unwrap()
+                .iter()
+                .map(|p| p.car())
+                .collect();
+            if !first_items.is_empty() && first_items[0].is_keyword() {
+                return serde_json::Value::Array(
+                    items
+                        .iter()
+                        .map(|item| value_to_json(item, None))
+                        .collect(),
+                );
+            }
+        }
+
+        // Plain list of values (symbols, numbers, etc.)
+        serde_json::Value::Array(
+            items
+                .iter()
+                .map(|item| value_to_json(item, None))
+                .collect(),
+        )
+    } else {
+        // Fallback
+        serde_json::Value::String(value.to_string())
+    }
+}
+
+/// Convert a plist (keyword-value pairs) to a JSON object.
+fn plist_to_json(items: &[&Value]) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    let mut i = 0;
+    while i < items.len() {
+        if let Some(key) = items[i].as_keyword() {
+            if i + 1 < items.len() {
+                let val = value_to_json(items[i + 1], Some(key));
+                map.insert(key.to_string(), val);
+                i += 2;
+            } else {
+                map.insert(key.to_string(), serde_json::Value::Bool(true));
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    serde_json::Value::Object(map)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,5 +527,50 @@ mod tests {
     fn test_is_found() {
         let value = parse_sexp("(:found 3 :query \"\" :maxnum 3)").unwrap();
         assert_eq!(is_found(&value), Some(3));
+    }
+
+    #[test]
+    fn test_sexp_to_json_envelope() {
+        let sexp = r#"(:docid 42 :subject "Hello World" :from ((:email "alice@example.com" :name "Alice")) :to ((:email "bob@example.com")) :date (27028 6999 0) :flags (seen list) :maildir "/Inbox" :path "/mail/Inbox/cur/123:2,S" :message-id "abc@example.com")"#;
+        let json = sexp_to_json(sexp).unwrap();
+
+        assert_eq!(json["docid"], 42);
+        assert_eq!(json["subject"], "Hello World");
+        assert_eq!(json["from"][0]["email"], "alice@example.com");
+        assert_eq!(json["from"][0]["name"], "Alice");
+        assert_eq!(json["to"][0]["email"], "bob@example.com");
+        assert_eq!(json["flags"][0], "seen");
+        assert_eq!(json["flags"][1], "list");
+        assert_eq!(json["maildir"], "/Inbox");
+        assert_eq!(json["path"], "/mail/Inbox/cur/123:2,S");
+        assert_eq!(json["message-id"], "abc@example.com");
+        // Date should be ISO 8601
+        let date_str = json["date"].as_str().unwrap();
+        assert!(date_str.contains("2026-"), "expected ISO 8601 date, got: {}", date_str);
+    }
+
+    #[test]
+    fn test_sexp_to_json_symbols() {
+        let sexp = "(:root t :draft nil)";
+        let json = sexp_to_json(sexp).unwrap();
+        assert_eq!(json["root"], true);
+        // nil with NilSymbol::Special is parsed as lexpr Nil → JSON null
+        assert!(json["draft"].is_null());
+    }
+
+    #[test]
+    fn test_sexp_to_json_nested_meta() {
+        let sexp = r#"(:docid 1 :meta (:level 0 :root t :thread-subject t))"#;
+        let json = sexp_to_json(sexp).unwrap();
+        assert_eq!(json["meta"]["level"], 0);
+        assert_eq!(json["meta"]["root"], true);
+    }
+
+    #[test]
+    fn test_sexp_to_json_priority_symbol() {
+        // mu sends :priority as a bare symbol like "normal" or "high"
+        let sexp = "(:docid 1 :priority normal)";
+        let json = sexp_to_json(sexp).unwrap();
+        assert_eq!(json["priority"], "normal");
     }
 }
