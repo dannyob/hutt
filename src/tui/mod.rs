@@ -2645,22 +2645,27 @@ pub async fn run(mut app: App) -> Result<()> {
                         let tmp_path = std::env::temp_dir()
                             .join(format!("hutt-compose-{}.eml", std::process::id()));
                         if std::fs::write(&tmp_path, &content).is_ok() {
-                            // Set env vars so the editor plugin can find the right mu database.
-                            if let Some(muhome) = app.config.effective_muhome(app.active_account) {
-                                std::env::set_var("HUTT_MUHOME", &muhome);
-                            } else {
-                                std::env::remove_var("HUTT_MUHOME");
+                            // Build env vars for the editor (child-only, not process-global).
+                            let muhome = app.config.effective_muhome(app.active_account);
+                            let account_name = app.account().map(|a| a.name.clone());
+                            let mut env_vars: Vec<(&str, String)> = Vec::new();
+                            if let Some(ref mh) = muhome {
+                                env_vars.push(("HUTT_MUHOME", mh.clone()));
                             }
-                            if let Some(acct) = app.account() {
-                                std::env::set_var("HUTT_ACCOUNT", &acct.name);
+                            if let Some(ref name) = account_name {
+                                env_vars.push(("HUTT_ACCOUNT", name.clone()));
                             }
+                            let env_refs: Vec<(&str, &str)> = env_vars
+                                .iter()
+                                .map(|(k, v)| (*k, v.as_str()))
+                                .collect();
 
                             io::stdout().execute(crossterm::event::DisableMouseCapture)?;
                             terminal::disable_raw_mode()?;
                             io::stdout().execute(LeaveAlternateScreen)?;
 
                             let modified =
-                                compose::launch_editor(&tmp_path, &app.config.editor)
+                                compose::launch_editor(&tmp_path, &app.config.editor, &env_refs)
                                     .unwrap_or(false);
 
                             // Send while terminal is still in normal mode so that

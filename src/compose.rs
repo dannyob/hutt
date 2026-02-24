@@ -228,7 +228,14 @@ pub fn build_compose_file(ctx: &ComposeContext, from_email: &str) -> Result<Stri
 
 /// Launch an external editor on the given file path, blocking until the editor
 /// exits. Returns `true` if the file was modified (mtime changed).
-pub fn launch_editor(file_path: &Path, editor: &str) -> Result<bool> {
+///
+/// `env_vars` are set only on the child process, not the hutt process
+/// (avoids thread-safety issues with `std::env::set_var`).
+pub fn launch_editor(
+    file_path: &Path,
+    editor: &str,
+    env_vars: &[(&str, &str)],
+) -> Result<bool> {
     let mtime_before = fs::metadata(file_path)
         .and_then(|m| m.modified())
         .unwrap_or(SystemTime::UNIX_EPOCH);
@@ -238,9 +245,12 @@ pub fn launch_editor(file_path: &Path, editor: &str) -> Result<bool> {
         .split_first()
         .context("editor command is empty")?;
 
-    let status = Command::new(cmd)
-        .args(args)
-        .arg(file_path)
+    let mut command = Command::new(cmd);
+    command.args(args).arg(file_path);
+    for (k, v) in env_vars {
+        command.env(k, v);
+    }
+    let status = command
         .status()
         .with_context(|| format!("failed to launch editor: {}", editor))?;
 
@@ -258,14 +268,24 @@ pub fn launch_editor(file_path: &Path, editor: &str) -> Result<bool> {
 /// Launch the editor in a split/new window if running inside kitty or tmux,
 /// otherwise fall back to a regular blocking editor launch.
 #[allow(dead_code)]
-pub fn launch_editor_split(file_path: &Path, editor: &str) -> Result<()> {
+pub fn launch_editor_split(
+    file_path: &Path,
+    editor: &str,
+    env_vars: &[(&str, &str)],
+) -> Result<()> {
     let file_str = file_path
         .to_str()
         .context("file path is not valid UTF-8")?;
 
+    // Build env export prefix for shell commands (kitty/tmux launch via sh -c)
+    let env_prefix: String = env_vars
+        .iter()
+        .map(|(k, v)| format!("{}={} ", k, shell_escape(v)))
+        .collect();
+
     // Try kitty first
     if std::env::var("KITTY_PID").is_ok() {
-        let editor_cmd = format!("{} {}", editor, file_str);
+        let editor_cmd = format!("{}{} {}", env_prefix, editor, file_str);
         let status = Command::new("kitten")
             .args(["@", "launch", "--type=window", "--", "sh", "-c", &editor_cmd])
             .status()
@@ -279,7 +299,7 @@ pub fn launch_editor_split(file_path: &Path, editor: &str) -> Result<()> {
 
     // Try tmux
     if std::env::var("TMUX").is_ok() {
-        let editor_cmd = format!("{} {}", editor, file_str);
+        let editor_cmd = format!("{}{} {}", env_prefix, editor, file_str);
         let status = Command::new("tmux")
             .args(["split-window", "-h", "-l", "50%", &editor_cmd])
             .status()
@@ -292,8 +312,13 @@ pub fn launch_editor_split(file_path: &Path, editor: &str) -> Result<()> {
     }
 
     // Fallback: blocking editor
-    launch_editor(file_path, editor)?;
+    launch_editor(file_path, editor, env_vars)?;
     Ok(())
+}
+
+/// Minimal shell escaping: wrap in single quotes, escape internal single quotes.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
