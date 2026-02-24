@@ -455,8 +455,26 @@ impl KeyMapper {
         None
     }
 
+    /// Normalize key events for consistent matching.
+    ///
+    /// With kitty keyboard protocol (DISAMBIGUATE_ESCAPE_CODES), shifted letters
+    /// may be reported as lowercase + SHIFT instead of uppercase + SHIFT.
+    /// Normalize to uppercase + SHIFT for consistent matching.
+    fn normalize_key(key: KeyEvent) -> KeyEvent {
+        if let KeyCode::Char(c) = key.code {
+            if c.is_ascii_lowercase() && key.modifiers.contains(KeyModifiers::SHIFT) {
+                return KeyEvent::new(
+                    KeyCode::Char(c.to_ascii_uppercase()),
+                    key.modifiers,
+                );
+            }
+        }
+        key
+    }
+
     /// Process a key event and return an action, considering current input mode.
-    pub fn handle(&mut self, key: KeyEvent, mode: &InputMode) -> Action {
+    pub fn handle(&mut self, raw_key: KeyEvent, mode: &InputMode) -> Action {
+        let key = Self::normalize_key(raw_key);
         // Input modes never use custom bindings (they need raw chars)
         match mode {
             InputMode::Search

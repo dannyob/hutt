@@ -3082,6 +3082,7 @@ pub async fn run(mut app: App) -> Result<()> {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
+            debug_log!("Key event: code={:?} modifiers={:?} kind={:?}", key.code, key.modifiers, key.kind);
             last_key_time = Instant::now();
 
             // In popup modes, handle arrow keys for navigation before passing to keymap
