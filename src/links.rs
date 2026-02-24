@@ -279,6 +279,15 @@ pub enum IpcCommand {
     Quit,
 }
 
+/// Response sent back to IPC clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status")]
+pub enum IpcResponse {
+    Ok,
+    Error { message: String },
+    MuFrames { frames: Vec<String> },
+}
+
 /// Serde-friendly mirror of `HuttUrl`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
@@ -774,6 +783,26 @@ mod tests {
         let encoded = url_encode(original);
         let decoded = url_decode(&encoded);
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn ipc_response_json_roundtrip() {
+        let resps = vec![
+            IpcResponse::Ok,
+            IpcResponse::Error { message: "not found".to_string() },
+            IpcResponse::MuFrames {
+                frames: vec![
+                    "(:docid 42 :subject \"Hello\")".to_string(),
+                    "(:docid 43 :subject \"World\")".to_string(),
+                ],
+            },
+        ];
+        for resp in &resps {
+            let json = serde_json::to_string(resp).unwrap();
+            let parsed: IpcResponse = serde_json::from_str(&json).unwrap();
+            let json2 = serde_json::to_string(&parsed).unwrap();
+            assert_eq!(json, json2);
+        }
     }
 
     #[test]
