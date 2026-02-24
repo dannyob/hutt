@@ -194,7 +194,6 @@ fn tab_style(folder: &str) -> Style {
 pub struct BottomBar<'a> {
     pub mode: &'a InputMode,
     pub pending_key: Option<String>,
-    pub search_input: Option<&'a str>,
     pub status_message: Option<&'a str>,
     pub filter_desc: Option<&'a str>,
     pub selection_count: usize,
@@ -232,31 +231,6 @@ impl<'a> Widget for BottomBar<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let style = Style::default().bg(Color::DarkGray).fg(Color::White);
         buf.set_style(area, style);
-
-        // Priority: search input > status message > normal hints
-        if let Some(search) = self.search_input {
-            let search_style = Style::default()
-                .bg(Color::DarkGray)
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD);
-            let prompt = " /";
-            buf.set_string(area.x, area.y, prompt, search_style);
-            buf.set_string(area.x + prompt.len() as u16, area.y, search, style);
-            // Cursor indicator
-            let cursor_x = area.x + prompt.len() as u16 + search.len() as u16;
-            if cursor_x < area.x + area.width {
-                buf.set_string(
-                    cursor_x,
-                    area.y,
-                    "_",
-                    Style::default()
-                        .bg(Color::DarkGray)
-                        .fg(Color::White)
-                        .add_modifier(Modifier::SLOW_BLINK),
-                );
-            }
-            return;
-        }
 
         let mut text = String::new();
 

@@ -45,6 +45,7 @@ use self::help_overlay::HelpOverlay;
 use self::preview::PreviewPane;
 use self::status_bar::{BottomBar, TopBar};
 use self::thread_view::{ThreadMessage, ThreadView};
+use tui_textarea::{TextArea, Input, Key, CursorMove};
 
 /// Write a debug line to the file at $HUTT_LOG (if set).
 /// Usage: `debug_log!("IPC received: {:?}", cmd);`
@@ -67,6 +68,34 @@ fn debug_log_path() -> Option<&'static str> {
     static PATH: OnceLock<Option<String>> = OnceLock::new();
     PATH.get_or_init(|| std::env::var("HUTT_LOG").ok())
         .as_deref()
+}
+
+/// Fill a rectangular area of the buffer with a style.
+fn buf_set_style_area(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, style: ratatui::style::Style) {
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            buf.cell_mut(ratatui::layout::Position::new(x, y))
+                .map(|c| c.set_style(style));
+        }
+    }
+}
+
+/// Create a single-line TextArea styled for the search bar.
+fn new_search_textarea(initial: &str) -> TextArea<'static> {
+    use ratatui::style::{Color, Modifier, Style};
+
+    let mut ta = TextArea::new(vec![initial.to_string()]);
+    ta.set_cursor_line_style(Style::default());
+    ta.set_cursor_style(
+        Style::default()
+            .fg(Color::White)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::REVERSED),
+    );
+    ta.set_style(Style::default().fg(Color::White).bg(Color::DarkGray));
+    // Move cursor to end of pre-filled text
+    ta.move_cursor(CursorMove::End);
+    ta
 }
 
 // ── Tab bar types ───────────────────────────────────────────────────
@@ -172,6 +201,7 @@ pub struct App {
 
     // Search
     pub search_input: String,
+    pub search_textarea: TextArea<'static>,
     pub previous_folder: Option<String>,
     pub search_history: Vec<String>,
     pub search_history_index: Option<usize>,
@@ -600,6 +630,7 @@ impl App {
             undo_stack: UndoStack::new(),
             selected_set: HashSet::new(),
             search_input: String::new(),
+            search_textarea: new_search_textarea(""),
             previous_folder: None,
             search_history: Vec::new(),
             search_history_index: None,
@@ -1870,7 +1901,7 @@ impl App {
                 // Pre-fill with the current folder's short name.
                 // #split and @smart references are expanded to their queries
                 // on submit (see expand_folder_references).
-                self.search_input = if self.current_folder.starts_with('#')
+                let prefill = if self.current_folder.starts_with('#')
                     || self.current_folder.starts_with('@')
                 {
                     format!("{} ", self.current_folder)
@@ -1879,6 +1910,8 @@ impl App {
                 } else {
                     format!("{} ", self.current_folder)
                 };
+                self.search_input = prefill.clone();
+                self.search_textarea = new_search_textarea(&prefill);
                 self.search_history_index = None;
                 self.mode = InputMode::Search;
             }
@@ -2073,7 +2106,7 @@ impl App {
 
             // Text input
             Action::InputChar(c) => match self.mode {
-                InputMode::Search => self.search_input.push(c),
+                InputMode::Search => {} // handled by textarea in event loop
                 InputMode::FolderPicker => {
                     self.folder_filter.push(c);
                     // Skip past the two special entries to first real folder
@@ -2100,9 +2133,7 @@ impl App {
                 _ => {}
             },
             Action::InputBackspace => match self.mode {
-                InputMode::Search => {
-                    self.search_input.pop();
-                }
+                InputMode::Search => {} // handled by textarea in event loop
                 InputMode::FolderPicker => {
                     self.folder_filter.pop();
                     self.folder_selected = 2;
@@ -2128,28 +2159,10 @@ impl App {
                 _ => {}
             },
             Action::InputHistoryPrev => {
-                if self.mode == InputMode::Search && !self.search_history.is_empty() {
-                    let idx = match self.search_history_index {
-                        None => self.search_history.len() - 1,
-                        Some(0) => 0,
-                        Some(i) => i - 1,
-                    };
-                    self.search_history_index = Some(idx);
-                    self.search_input = self.search_history[idx].clone();
-                }
+                // Search history is handled by textarea in event loop
             }
             Action::InputHistoryNext => {
-                if self.mode == InputMode::Search {
-                    if let Some(idx) = self.search_history_index {
-                        if idx + 1 < self.search_history.len() {
-                            self.search_history_index = Some(idx + 1);
-                            self.search_input = self.search_history[idx + 1].clone();
-                        } else {
-                            self.search_history_index = None;
-                            self.search_input.clear();
-                        }
-                    }
-                }
+                // Search history is handled by textarea in event loop
             }
             Action::InputSubmit => match self.mode {
                 InputMode::Search => self.execute_search().await?,
@@ -2616,21 +2629,37 @@ pub async fn run(mut app: App) -> Result<()> {
             }
 
             // Bottom bar
-            let filter_desc = app.filter_description();
-            let bottom = BottomBar {
-                mode: &app.mode,
-                pending_key: app.keymap.pending_display(),
-                search_input: if app.mode == InputMode::Search {
-                    Some(&app.search_input)
-                } else {
-                    None
-                },
-                status_message: app.status_message.as_deref(),
-                filter_desc: filter_desc.as_deref(),
-                selection_count: app.selected_set.len(),
-                conversations_mode: app.conversations_mode,
-            };
-            frame.render_widget(bottom, outer[2]);
+            if app.mode == InputMode::Search {
+                // Render search textarea with "/" prompt
+                use ratatui::style::{Color, Modifier, Style};
+                let bar_area = outer[2];
+                let prompt_style = Style::default()
+                    .bg(Color::DarkGray)
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD);
+                // Fill background
+                buf_set_style_area(frame.buffer_mut(), bar_area,
+                    Style::default().bg(Color::DarkGray));
+                frame.buffer_mut().set_string(bar_area.x, bar_area.y, " /", prompt_style);
+                let ta_area = ratatui::layout::Rect::new(
+                    bar_area.x + 2,
+                    bar_area.y,
+                    bar_area.width.saturating_sub(2),
+                    1,
+                );
+                frame.render_widget(&app.search_textarea, ta_area);
+            } else {
+                let filter_desc = app.filter_description();
+                let bottom = BottomBar {
+                    mode: &app.mode,
+                    pending_key: app.keymap.pending_display(),
+                    status_message: app.status_message.as_deref(),
+                    filter_desc: filter_desc.as_deref(),
+                    selection_count: app.selected_set.len(),
+                    conversations_mode: app.conversations_mode,
+                };
+                frame.render_widget(bottom, outer[2]);
+            }
 
             if app.mode == InputMode::FolderPicker {
                 let filtered = app.filtered_folders();
@@ -3106,6 +3135,68 @@ pub async fn run(mut app: App) -> Result<()> {
                 continue;
             }
             last_key_time = Instant::now();
+
+            // Search mode: route events to the TextArea, intercept control keys
+            if app.mode == InputMode::Search {
+                let input: Input = key.into();
+                match input {
+                    Input { key: Key::Esc, .. } => {
+                        let action = app.keymap.handle(key, &app.mode);
+                        if let Err(e) = app.handle_action(action).await {
+                            app.set_status(format!("Error: {}", e));
+                        }
+                    }
+                    Input { key: Key::Enter, .. } => {
+                        // Sync textarea content back to search_input, then submit
+                        app.search_input = app.search_textarea.lines()[0].clone();
+                        let action = app.keymap.handle(key, &app.mode);
+                        if let Err(e) = app.handle_action(action).await {
+                            app.set_status(format!("Error: {}", e));
+                        }
+                    }
+                    Input { key: Key::Up, .. } => {
+                        // History prev
+                        if !app.search_history.is_empty() {
+                            let idx = match app.search_history_index {
+                                None => app.search_history.len() - 1,
+                                Some(0) => 0,
+                                Some(i) => i - 1,
+                            };
+                            app.search_history_index = Some(idx);
+                            let text = app.search_history[idx].clone();
+                            app.search_input = text.clone();
+                            app.search_textarea = new_search_textarea(&text);
+                        }
+                    }
+                    Input { key: Key::Down, .. } => {
+                        // History next
+                        if let Some(idx) = app.search_history_index {
+                            if idx + 1 < app.search_history.len() {
+                                app.search_history_index = Some(idx + 1);
+                                let text = app.search_history[idx + 1].clone();
+                                app.search_input = text.clone();
+                                app.search_textarea = new_search_textarea(&text);
+                            } else {
+                                app.search_history_index = None;
+                                app.search_input.clear();
+                                app.search_textarea = new_search_textarea("");
+                            }
+                        }
+                    }
+                    Input { key: Key::Char('c'), ctrl: true, .. } => {
+                        // Ctrl+C quits
+                        if let Err(e) = app.handle_action(Action::Quit).await {
+                            app.set_status(format!("Error: {}", e));
+                        }
+                    }
+                    _ => {
+                        // Pass everything else to the textarea
+                        app.search_textarea.input(input);
+                        app.search_input = app.search_textarea.lines()[0].clone();
+                    }
+                }
+                continue;
+            }
 
             // In popup modes, handle arrow keys for navigation before passing to keymap
             match app.mode {
