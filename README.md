@@ -5,7 +5,7 @@ Superhuman's UX. Built in Rust with [ratatui](https://ratatui.rs/).
 
 hutt uses [mu](https://www.djcbsoftware.nl/code/mu/) as its mail indexing
 backend and expects a Maildir-synced mailbox (via
-[mbsync](https://isstracked.com/isstracked.com/isync),
+[mbsync](https://isync.sourceforge.io/),
 [offlineimap](https://www.offlineimap.org/), or similar).
 
 ## Features
@@ -29,6 +29,8 @@ backend and expects a Maildir-synced mailbox (via
 - **Linkability** — `mid:`, `message:`, `mailto:`, `hutt:` URI schemes; IPC; copy message URLs
 - **Command palette** — Ctrl+k to fuzzy-search all available actions
 - **Help overlay** — press `?` for a full shortcut reference
+- **Scriptable CLI** — `hutt remote` with `--sexp`/`--json` output for scripting
+- **mu server proxy** — `hutt server` as a drop-in `mu server` replacement
 
 ## Requirements
 
@@ -82,151 +84,9 @@ password_command = "pass show email/smtp"
 hutt                              # opens default account inbox
 hutt /Sent                        # opens a specific folder
 hutt -a work /Drafts              # opens Drafts on the 'work' account
-hutt r search from:alice          # search in the running instance
-hutt r search -a work from:alice  # search on a specific account
-hutt r open-url 'mid:abc@example.com?view=thread'  # open a thread via URI
 ```
 
 See `hutt --help` for full CLI documentation.
-
-## Split Inbox
-
-Split inbox partitions your inbox into focused sub-views using mu
-queries — similar to Superhuman's split inbox feature. Each split
-removes matching messages from the main Inbox view and shows them in
-their own tab.
-
-Splits are defined per-account in `~/.config/hutt/splits.<account>.toml`:
-
-```toml
-[[splits]]
-name = "GitHub"
-query = "from:notifications@github.com"
-
-[[splits]]
-name = "Newsletters"
-query = "from:substack.com or from:noreply@medium.com"
-
-[[splits]]
-name = "Starred"
-query = "flag:flagged"
-```
-
-Split tabs appear in the tab bar with a `#` prefix (e.g. `#GitHub`).
-You can also create and delete splits from within hutt:
-
-- **Create**: `Ctrl+k` → "Create Split", or use the command palette
-- **Delete**: open the folder picker (`gl`), navigate to a `#split`,
-  press `d`
-- **Undo delete**: press `z`
-
-Splits use client-side filtering — queries run at startup and after
-each reindex, caching matching message IDs. The inbox view excludes
-anything that matches any split. Splits may overlap; a message can
-appear in multiple splits.
-
-### Importing from Superhuman
-
-If you're migrating from Superhuman, the included import script can
-extract your split definitions:
-
-```sh
-# Show all splits from all accounts
-python3 scripts/superhuman-import.py
-
-# Export as hutt TOML for a specific account
-python3 scripts/superhuman-import.py --account user@example.com --hutt
-
-# Include disabled splits too
-python3 scripts/superhuman-import.py --include-disabled --hutt
-```
-
-The script reads Superhuman's local SQLite databases and converts
-queries to mu syntax where possible (e.g. `is:starred` → `flag:flagged`,
-`filename:ics` → `mime:text/calendar`). Superhuman-specific features
-like `is:shared` and ML-based classifiers are flagged as untranslatable.
-
-## Smart Folders
-
-Smart folders are saved mu searches that appear as virtual folders.
-They're stored per-account in `~/.config/hutt/smart-folders/<account>/`.
-
-Smart folder tabs appear with an `@` prefix (e.g. `@Unread today`).
-
-- **Create**: `Ctrl+k` → "Create Smart Folder"
-- **Delete**: folder picker (`gl`) → navigate to `@folder` → press `d`
-
-## Multi-Account
-
-Configure multiple accounts in your config file:
-
-```toml
-[[accounts]]
-name = "work"
-email = "you@work.com"
-maildir = "~/Mail/work"
-default = true
-# ...
-
-[[accounts]]
-name = "personal"
-email = "you@example.com"
-maildir = "~/Mail/personal"
-# ...
-```
-
-Switch accounts with:
-- `gA` — open account picker popup
-- `gTab` / `gShift+Tab` — cycle to next/previous account
-- Click the account name in the tab bar
-
-Each account has its own mu database, folders, splits, and smart
-folders. Set `muhome` per-account if they use separate mu databases.
-
-## Tab Bar
-
-The top bar shows clickable folder tabs:
-
-```
- work  /Inbox  #GitHub  #Newsletters  /Archive  /Sent  @Unread  …
-```
-
-- **Account badge** (left) — click to open account picker
-- **Inbox** — always pinned on the left
-- **Folder tabs** — click to navigate; `Tab`/`Shift+Tab` to cycle
-- **Overflow `…`** (right) — click to open the full folder picker
-
-Tabs are color-coded: splits (`#`) in cyan, smart folders (`@`) in
-yellow, maildir folders (`/`) in white. The selected tab is highlighted
-in blue.
-
-### Configuring Tab Order
-
-Customize which tabs appear and in what order per-account:
-
-```toml
-[[accounts]]
-name = "work"
-tabs = ["/Inbox", "#GitHub", "#Newsletters", "#", "/Archive", "/Sent", "@"]
-# ...
-```
-
-Wildcards expand to "remaining items of this type":
-- `"/"` — all remaining maildir folders not explicitly listed
-- `"#"` — all remaining splits not explicitly listed
-- `"@"` — all remaining smart folders not explicitly listed
-
-Default when `tabs` is omitted: `["/Inbox", "#", "/", "@"]`
-
-## Mouse Support
-
-hutt supports mouse interaction:
-
-- **Tab bar** — click any tab to navigate to that folder
-- **Account badge** — click to open the account picker
-- **Overflow `…`** — click to open the folder picker
-- **Border drag** — drag the border between the message list and
-  preview pane to resize (hold left click and drag)
 
 ## Keyboard Shortcuts
 
@@ -342,6 +202,140 @@ to cancel.
 | `?`      | Help overlay      |
 | `q`      | Quit              |
 
+## Split Inbox
+
+Split inbox partitions your inbox into focused sub-views using mu
+queries — similar to Superhuman's split inbox feature. Each split
+removes matching messages from the main Inbox view and shows them in
+their own tab.
+
+Splits are defined per-account in `~/.config/hutt/splits.<account>.toml`:
+
+```toml
+[[splits]]
+name = "GitHub"
+query = "from:notifications@github.com"
+
+[[splits]]
+name = "Newsletters"
+query = "from:substack.com or from:noreply@medium.com"
+
+[[splits]]
+name = "Starred"
+query = "flag:flagged"
+```
+
+Split tabs appear in the tab bar with a `#` prefix (e.g. `#GitHub`).
+You can also create and delete splits from within hutt:
+
+- **Create**: `Ctrl+k` → "Create Split", or use the command palette
+- **Delete**: open the folder picker (`gl`), navigate to a `#split`,
+  press `d`
+- **Undo delete**: press `z`
+
+Splits use client-side filtering — queries run at startup and after
+each reindex, caching matching message IDs. The inbox view excludes
+anything that matches any split. Splits may overlap; a message can
+appear in multiple splits.
+
+### Importing from Superhuman
+
+If you're migrating from Superhuman, the included import script can
+extract your split definitions:
+
+```sh
+# Show all splits from all accounts
+python3 scripts/superhuman-import.py
+
+# Export as hutt TOML for a specific account
+python3 scripts/superhuman-import.py --account user@example.com --hutt
+
+# Include disabled splits too
+python3 scripts/superhuman-import.py --include-disabled --hutt
+```
+
+## Smart Folders
+
+Smart folders are saved mu searches that appear as virtual folders.
+They're stored per-account in `~/.config/hutt/smart-folders/<account>/`.
+
+Smart folder tabs appear with an `@` prefix (e.g. `@Unread today`).
+
+- **Create**: `Ctrl+k` → "Create Smart Folder"
+- **Delete**: folder picker (`gl`) → navigate to `@folder` → press `d`
+
+## Multi-Account
+
+Configure multiple accounts in your config file:
+
+```toml
+[[accounts]]
+name = "work"
+email = "you@work.com"
+maildir = "~/Mail/work"
+default = true
+# ...
+
+[[accounts]]
+name = "personal"
+email = "you@example.com"
+maildir = "~/Mail/personal"
+# ...
+```
+
+Switch accounts with:
+- `gA` — open account picker popup
+- `gTab` / `gShift+Tab` — cycle to next/previous account
+- Click the account name in the tab bar
+
+Each account has its own mu database, folders, splits, and smart
+folders. Set `muhome` per-account if they use separate mu databases.
+
+## Tab Bar
+
+The top bar shows clickable folder tabs:
+
+```
+ work  /Inbox  #GitHub  #Newsletters  /Archive  /Sent  @Unread  …
+```
+
+- **Account badge** (left) — click to open account picker
+- **Inbox** — always pinned on the left
+- **Folder tabs** — click to navigate; `Tab`/`Shift+Tab` to cycle
+- **Overflow `…`** (right) — click to open the full folder picker
+
+Tabs are color-coded: splits (`#`) in cyan, smart folders (`@`) in
+yellow, maildir folders (`/`) in white. The selected tab is highlighted
+in blue.
+
+### Configuring Tab Order
+
+Customize which tabs appear and in what order per-account:
+
+```toml
+[[accounts]]
+name = "work"
+tabs = ["/Inbox", "#GitHub", "#Newsletters", "#", "/Archive", "/Sent", "@"]
+# ...
+```
+
+Wildcards expand to "remaining items of this type":
+- `"/"` — all remaining maildir folders not explicitly listed
+- `"#"` — all remaining splits not explicitly listed
+- `"@"` — all remaining smart folders not explicitly listed
+
+Default when `tabs` is omitted: `["/Inbox", "#", "/", "@"]`
+
+## Mouse Support
+
+hutt supports mouse interaction:
+
+- **Tab bar** — click any tab to navigate to that folder
+- **Account badge** — click to open the account picker
+- **Overflow `…`** — click to open the folder picker
+- **Border drag** — drag the border between the message list and
+  preview pane to resize (hold left click and drag)
+
 ## Custom Keybindings
 
 All default keybindings can be overridden or extended in the `[bindings]`
@@ -395,6 +389,122 @@ The plugin provides:
 - `:HuttDiscard` / `<leader>d` to cancel
 - Contact completion via `mu cfind` on To/Cc/Bcc lines (Ctrl+x Ctrl+o)
 
+---
+
+## Remote Commands
+
+When hutt is running, you can control it from another terminal via
+`hutt remote` (or `hutt r`):
+
+```sh
+hutt r search from:alice              # search in the running instance
+hutt r search --account=work from:bob # search on a specific account
+hutt r navigate /Sent                 # switch to a folder
+hutt r open <message-id>              # open a message by Message-ID
+hutt r thread <message-id>            # open a thread by Message-ID
+hutt r compose --to=bob@example.com --subject="Hello"
+hutt r open-url 'mid:abc@example.com?view=thread'
+hutt r quit                           # quit the running instance
+```
+
+All remote commands accept `--account=NAME` to target a specific account.
+
+### Structured Output (`--sexp`, `--json`)
+
+Remote commands can return structured data for scripting. By default
+output is silent (the command executes in the TUI only). Add `--sexp`
+or `--json` to get the results on stdout.
+
+**`--sexp`** — one mu-compatible S-expression plist per line:
+
+```sh
+$ hutt r --sexp search 'from:alice date:today'
+(:docid 42 :subject "Project update" :path "/mail/Inbox/cur/123:2,S" :from ((:email "alice@example.com" :name "Alice")) :date (27028 6999 0) :flags (seen) :maildir "/Inbox")
+(:docid 43 :subject "Re: Project update" :path "/mail/Inbox/cur/124:2,S" ...)
+```
+
+**`--json`** — one JSON object per line (ndjson), with ISO 8601 dates:
+
+```sh
+$ hutt r --json search 'from:alice date:today'
+{"docid":42,"subject":"Project update","path":"/mail/Inbox/cur/123:2,S","from":[{"email":"alice@example.com","name":"Alice"}],"date":"2026-02-24T10:30:00+00:00","flags":["seen"],"maildir":"/Inbox"}
+```
+
+**`--wrapped`** — combine with `--sexp` or `--json` to wrap all results
+in a single container:
+
+```sh
+# Wrapped sexp (mu-compatible response format)
+$ hutt r --sexp --wrapped search 'from:alice'
+(:headers ((:docid 42 ...) (:docid 43 ...)) :found 2)
+
+# Wrapped JSON
+$ hutt r --json --wrapped search 'from:alice'
+{"headers":[{...},{...}],"found":2}
+```
+
+**Errors** are also structured (exit code 1):
+
+```sh
+$ hutt r --json open nonexistent@example.com
+{"error":"message not found: nonexistent@example.com"}
+```
+
+**Scripting examples:**
+
+```sh
+# Get file paths for all messages from alice today
+hutt r --json search 'from:alice date:today' | jq -r '.path'
+
+# Count unread messages
+hutt r --json --wrapped search 'flag:unread' | jq '.found'
+
+# Pipe message files into another tool
+hutt r --json search 'flag:attach' | jq -r '.path' | xargs -I{} mshow {}
+```
+
+### What each command returns
+
+| Command | `--sexp` / `--json` output |
+|---------|---------------------------|
+| `search <query>` | All matching envelopes |
+| `open <message-id>` | The matched envelope |
+| `thread <message-id>` | All envelopes in the thread |
+| `navigate <folder>` | All envelopes in the folder |
+| `compose`, `quit` | Nothing (just ok/error) |
+
+Each envelope includes: `docid`, `message-id`, `subject`, `from`, `to`,
+`date`, `flags`, `path` (full filesystem path to the Maildir message
+file), `maildir`, and thread metadata.
+
+## hutt server
+
+`hutt server` is a drop-in replacement for `mu server` that proxies
+commands through the running hutt instance's mu server via IPC. This
+solves the Xapian exclusive lock problem — external tools can query mu
+while hutt is running.
+
+```sh
+hutt server                              # interactive mode (stdin/stdout)
+hutt server --eval '(ping)'             # evaluate a single S-expression
+hutt server --eval '(find :query "flag:unread" :sortfield :date :maxnum 100 :threads t)'
+hutt server --muhome ~/.cache/mu/work   # route to a specific account
+hutt server --account work              # same, by account name
+hutt server --commands                  # list available mu commands
+```
+
+When hutt is running, commands are proxied through its mu server. When
+hutt is not running (or `--muhome` doesn't match any account), `hutt
+server` falls back to spawning `mu server` directly — making it a safe
+drop-in replacement in all contexts.
+
+**Interactive mode** speaks the same mu wire protocol (length-prefixed
+S-expression frames on stdin/stdout), so it works as a backend for
+mu4e, mu-cite, or any tool that expects `mu server`.
+
+**`--eval` mode** sends a single S-expression and prints the response
+frames, then exits.
+
 ## URI Schemes
 
 hutt uses standard URI schemes where they exist, with app-specific schemes
@@ -446,7 +556,6 @@ make install-linux-handler
 Installs `hutt-open` to `~/.local/bin/` and registers a `.desktop` file
 with `xdg-mime` as the handler for `mid`, `message`, and `hutt` schemes.
 
-
 ## Debugging
 
 Set `HUTT_LOG` to a file path for debug output:
@@ -459,16 +568,16 @@ HUTT_LOG=/tmp/hutt.log hutt
 
 ```
 src/
-├── main.rs           Entry point, arg parsing
+├── main.rs           Entry point, arg parsing, hutt server CLI
 ├── config.rs         TOML config loading
-├── mu_client.rs      mu server IPC (S-expression protocol)
-├── mu_sexp.rs        S-expression parser
+├── mu_client.rs      mu server IPC (S-expression protocol, find_capturing)
+├── mu_sexp.rs        S-expression parser, sexp↔JSON conversion, wire framing
 ├── envelope.rs       Envelope data model, flag handling
 ├── mime_render.rs    MIME parsing and text rendering
 ├── keymap.rs         Input mode state machine, key mapping
 ├── compose.rs        Compose context building, editor launch
 ├── send.rs           SMTP sending via lettre
-├── links.rs          URL scheme, clipboard, IPC socket
+├── links.rs          URL schemes, clipboard, bidirectional IPC (IpcCommand/IpcResponse)
 ├── undo.rs           Undo stack for triage actions
 ├── splits.rs         Split inbox persistence (per-account TOML)
 ├── smart_folders.rs  Smart folder persistence
@@ -488,10 +597,23 @@ macos/
 └── hutt-opener/Contents/     .app bundle template (Info.plist + shell script)
 linux/
 └── hutt-opener.desktop       XDG URL scheme registration
-tests/
-├── test-url-handler.sh       Podman-based URL handler test
-└── container-url-test.py     Test harness (runs inside container)
 ```
+
+### IPC protocol
+
+hutt's IPC is bidirectional request/response over a Unix domain socket.
+The client sends a JSON-encoded `IpcCommand`, shuts down the write side,
+and reads back a JSON-encoded `IpcResponse`:
+
+```
+IpcCommand: Open | Navigate | Quit | MuCommand
+IpcResponse: Ok | Error { message } | MuFrames { frames: [sexp strings] }
+```
+
+`MuFrames` carries raw mu S-expression strings — either individual
+envelope plists (for remote commands) or raw mu server response frames
+(for `hutt server` proxying). The CLI formats these as `--sexp` or
+`--json` output.
 
 ## License
 
