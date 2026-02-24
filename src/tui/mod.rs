@@ -1351,6 +1351,7 @@ impl App {
             &self.smart_create_name
         };
         self.smart_create_textarea = new_search_textarea(text);
+        self.vim_sub_mode = VimSubMode::Insert;
     }
 
     /// Open the query editor for a @smart or #split folder.
@@ -2837,6 +2838,22 @@ pub async fn run(mut app: App) -> Result<()> {
                 };
                 let ta_area = popup.textarea_area(size);
                 frame.render_widget(popup, size);
+
+                // Update cursor style based on vim sub-mode
+                use ratatui::style::{Color, Modifier, Style};
+                if app.config.vim_mode && app.vim_sub_mode == VimSubMode::Normal {
+                    app.smart_create_textarea.set_cursor_style(
+                        Style::default().fg(Color::Black).bg(Color::White),
+                    );
+                } else {
+                    app.smart_create_textarea.set_cursor_style(
+                        Style::default()
+                            .fg(Color::White)
+                            .bg(Color::DarkGray)
+                            .add_modifier(Modifier::REVERSED),
+                    );
+                }
+
                 // Render textarea over the active field
                 frame.render_widget(&app.smart_create_textarea, ta_area);
             }
@@ -3496,46 +3513,183 @@ pub async fn run(mut app: App) -> Result<()> {
             // Smart folder/split create/edit: route events to textarea
             if matches!(app.mode, InputMode::SmartFolderCreate | InputMode::SmartFolderName) {
                 let input: Input = key.into();
-                match input {
-                    Input { key: Key::Esc, .. } => {
-                        // Sync textarea back before cancel/back
-                        let text = app.smart_create_textarea.lines()[0].clone();
-                        if app.smart_create_phase == 0 {
-                            app.smart_create_query = text;
-                        } else {
-                            app.smart_create_name = text;
-                        }
-                        let action = app.keymap.handle(key, &app.mode);
-                        if let Err(e) = app.handle_action(action).await {
-                            app.set_status(format!("Error: {}", e));
-                        }
+                let vim = app.config.vim_mode;
+
+                // Sync textarea content back to the appropriate string field
+                let sync_back = |app: &mut App| {
+                    let text = app.smart_create_textarea.lines()[0].clone();
+                    if app.smart_create_phase == 0 {
+                        app.smart_create_query = text;
+                    } else {
+                        app.smart_create_name = text;
                     }
-                    Input { key: Key::Enter, .. } => {
-                        // Sync textarea back before submit
-                        let text = app.smart_create_textarea.lines()[0].clone();
-                        if app.smart_create_phase == 0 {
-                            app.smart_create_query = text;
-                        } else {
-                            app.smart_create_name = text;
-                        }
-                        let action = app.keymap.handle(key, &app.mode);
-                        if let Err(e) = app.handle_action(action).await {
-                            app.set_status(format!("Error: {}", e));
-                        }
+                };
+
+                // Sync back and trigger preview update
+                let sync_and_preview = |app: &mut App| {
+                    let text = app.smart_create_textarea.lines()[0].clone();
+                    if app.smart_create_phase == 0 {
+                        app.smart_create_query = text;
+                        true // needs preview update
+                    } else {
+                        app.smart_create_name = text;
+                        false
                     }
-                    Input { key: Key::Char('c'), ctrl: true, .. } => {
-                        if let Err(e) = app.handle_action(Action::Quit).await {
-                            app.set_status(format!("Error: {}", e));
-                        }
+                };
+
+                // Ctrl+C always quits, Ctrl+G always cancels
+                if matches!(input, Input { key: Key::Char('c'), ctrl: true, .. }) {
+                    if let Err(e) = app.handle_action(Action::Quit).await {
+                        app.set_status(format!("Error: {}", e));
                     }
-                    _ => {
-                        app.smart_create_textarea.input(input);
-                        let text = app.smart_create_textarea.lines()[0].clone();
-                        if app.smart_create_phase == 0 {
-                            app.smart_create_query = text;
-                            app.update_smart_create_preview().await;
-                        } else {
-                            app.smart_create_name = text;
+                    continue;
+                }
+                if matches!(input, Input { key: Key::Char('g'), ctrl: true, .. }) {
+                    sync_back(&mut app);
+                    let action = app.keymap.handle(
+                        crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Esc, crossterm::event::KeyModifiers::NONE),
+                        &app.mode,
+                    );
+                    if let Err(e) = app.handle_action(action).await {
+                        app.set_status(format!("Error: {}", e));
+                    }
+                    continue;
+                }
+
+                if vim && app.vim_sub_mode == VimSubMode::Normal {
+                    // ── Vim Normal mode ──
+                    match input {
+                        Input { key: Key::Esc, .. } | Input { key: Key::Char('q'), ctrl: false, .. } => {
+                            sync_back(&mut app);
+                            let action = app.keymap.handle(
+                                crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Esc, crossterm::event::KeyModifiers::NONE),
+                                &app.mode,
+                            );
+                            if let Err(e) = app.handle_action(action).await {
+                                app.set_status(format!("Error: {}", e));
+                            }
+                        }
+                        Input { key: Key::Enter, .. } => {
+                            sync_back(&mut app);
+                            let action = app.keymap.handle(key, &app.mode);
+                            if let Err(e) = app.handle_action(action).await {
+                                app.set_status(format!("Error: {}", e));
+                            }
+                        }
+                        // Mode switches
+                        Input { key: Key::Char('i'), ctrl: false, .. } => {
+                            app.vim_sub_mode = VimSubMode::Insert;
+                        }
+                        Input { key: Key::Char('a'), ctrl: false, .. } => {
+                            app.smart_create_textarea.move_cursor(CursorMove::Forward);
+                            app.vim_sub_mode = VimSubMode::Insert;
+                        }
+                        Input { key: Key::Char('A'), ctrl: false, .. } => {
+                            app.smart_create_textarea.move_cursor(CursorMove::End);
+                            app.vim_sub_mode = VimSubMode::Insert;
+                        }
+                        Input { key: Key::Char('I'), ctrl: false, .. } => {
+                            app.smart_create_textarea.move_cursor(CursorMove::Head);
+                            app.vim_sub_mode = VimSubMode::Insert;
+                        }
+                        // Motions
+                        Input { key: Key::Char('h'), ctrl: false, .. }
+                        | Input { key: Key::Left, .. } => {
+                            app.smart_create_textarea.move_cursor(CursorMove::Back);
+                        }
+                        Input { key: Key::Char('l'), ctrl: false, .. }
+                        | Input { key: Key::Right, .. } => {
+                            app.smart_create_textarea.move_cursor(CursorMove::Forward);
+                        }
+                        Input { key: Key::Char('w'), ctrl: false, .. } => {
+                            app.smart_create_textarea.move_cursor(CursorMove::WordForward);
+                        }
+                        Input { key: Key::Char('b'), ctrl: false, .. } => {
+                            app.smart_create_textarea.move_cursor(CursorMove::WordBack);
+                        }
+                        Input { key: Key::Char('e'), ctrl: false, .. } => {
+                            app.smart_create_textarea.move_cursor(CursorMove::WordEnd);
+                        }
+                        Input { key: Key::Char('0'), ctrl: false, .. }
+                        | Input { key: Key::Home, .. } => {
+                            app.smart_create_textarea.move_cursor(CursorMove::Head);
+                        }
+                        Input { key: Key::Char('$'), ctrl: false, .. }
+                        | Input { key: Key::End, .. } => {
+                            app.smart_create_textarea.move_cursor(CursorMove::End);
+                        }
+                        Input { key: Key::Char('^'), ctrl: false, .. } => {
+                            app.smart_create_textarea.move_cursor(CursorMove::Head);
+                        }
+                        // Editing
+                        Input { key: Key::Char('x'), ctrl: false, .. } => {
+                            app.smart_create_textarea.delete_next_char();
+                            if sync_and_preview(&mut app) { app.update_smart_create_preview().await; }
+                        }
+                        Input { key: Key::Char('X'), ctrl: false, .. } => {
+                            app.smart_create_textarea.delete_char();
+                            if sync_and_preview(&mut app) { app.update_smart_create_preview().await; }
+                        }
+                        Input { key: Key::Char('D'), ctrl: false, .. } => {
+                            app.smart_create_textarea.delete_line_by_end();
+                            if sync_and_preview(&mut app) { app.update_smart_create_preview().await; }
+                        }
+                        Input { key: Key::Char('C'), ctrl: false, .. } => {
+                            app.smart_create_textarea.delete_line_by_end();
+                            if sync_and_preview(&mut app) { app.update_smart_create_preview().await; }
+                            app.vim_sub_mode = VimSubMode::Insert;
+                        }
+                        Input { key: Key::Char('c'), ctrl: false, .. } => {
+                            app.smart_create_textarea.move_cursor(CursorMove::Head);
+                            app.smart_create_textarea.delete_line_by_end();
+                            if sync_and_preview(&mut app) { app.update_smart_create_preview().await; }
+                            app.vim_sub_mode = VimSubMode::Insert;
+                        }
+                        Input { key: Key::Char('s'), ctrl: false, .. } => {
+                            app.smart_create_textarea.delete_next_char();
+                            if sync_and_preview(&mut app) { app.update_smart_create_preview().await; }
+                            app.vim_sub_mode = VimSubMode::Insert;
+                        }
+                        Input { key: Key::Char('u'), ctrl: false, .. } => {
+                            app.smart_create_textarea.undo();
+                            if sync_and_preview(&mut app) { app.update_smart_create_preview().await; }
+                        }
+                        Input { key: Key::Char('r'), ctrl: true, .. } => {
+                            app.smart_create_textarea.redo();
+                            if sync_and_preview(&mut app) { app.update_smart_create_preview().await; }
+                        }
+                        Input { key: Key::Char('p'), ctrl: false, .. } => {
+                            app.smart_create_textarea.paste();
+                            if sync_and_preview(&mut app) { app.update_smart_create_preview().await; }
+                        }
+                        _ => {}
+                    }
+                } else {
+                    // ── Emacs mode (default) or Vim Insert mode ──
+                    match input {
+                        Input { key: Key::Esc, .. } => {
+                            if vim {
+                                app.vim_sub_mode = VimSubMode::Normal;
+                            } else {
+                                sync_back(&mut app);
+                                let action = app.keymap.handle(key, &app.mode);
+                                if let Err(e) = app.handle_action(action).await {
+                                    app.set_status(format!("Error: {}", e));
+                                }
+                            }
+                        }
+                        Input { key: Key::Enter, .. } => {
+                            sync_back(&mut app);
+                            let action = app.keymap.handle(key, &app.mode);
+                            if let Err(e) = app.handle_action(action).await {
+                                app.set_status(format!("Error: {}", e));
+                            }
+                        }
+                        _ => {
+                            app.smart_create_textarea.input(input);
+                            if sync_and_preview(&mut app) {
+                                app.update_smart_create_preview().await;
+                            }
                         }
                     }
                 }
