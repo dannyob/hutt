@@ -72,6 +72,8 @@ pub struct AccountConfig {
     /// Tab bar order. Wildcards: "/" = remaining maildirs, "#" = remaining splits, "@" = remaining smart folders.
     /// Default when omitted: ["/Inbox", "#", "/", "@"]
     pub tabs: Option<Vec<String>>,
+    /// Human-readable description of this account (for LLM context, docs, etc.).
+    pub description: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -265,7 +267,7 @@ impl Config {
     }
 
     /// Return the first config path that actually exists on disk, or `None`.
-    fn locate() -> Option<PathBuf> {
+    pub fn locate() -> Option<PathBuf> {
         let candidates = Self::candidate_paths();
         candidates.into_iter().find(|p| p.is_file())
     }
