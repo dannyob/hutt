@@ -107,6 +107,7 @@ pub enum Action {
     // Splits / Smart folders
     CreateSplit,
     EditFolder,
+    DeleteFolder,
 
     // Account picker
     OpenAccountPicker,
@@ -316,6 +317,7 @@ pub fn parse_action_name(name: &str) -> Result<Action, String> {
         "sync_mail" | "sync" => Ok(Action::SyncMail),
         "create_split" => Ok(Action::CreateSplit),
         "edit_folder" => Ok(Action::EditFolder),
+        "delete_folder" => Ok(Action::DeleteFolder),
         "open_account_picker" | "account_picker" => Ok(Action::OpenAccountPicker),
         "quit" => Ok(Action::Quit),
         _ => Err(format!("unknown action: {:?}", name)),
@@ -421,6 +423,7 @@ fn action_to_name(action: &Action) -> Option<String> {
         Action::SyncMail => "sync_mail",
         Action::CreateSplit => "create_split",
         Action::EditFolder => "edit_folder",
+        Action::DeleteFolder => "delete_folder",
         Action::OpenAccountPicker => "account_picker",
         Action::Quit => "quit",
         Action::Redraw => "redraw",
@@ -613,6 +616,7 @@ impl KeyMapper {
                 ("go_spam", "g!", "Go to Spam"),
                 ("go_folder_picker", "gl", "Folder picker"),
                 ("edit_folder", "Ctrl+e", "Edit folder query"),
+                ("delete_folder", "Ctrl+d", "Delete folder"),
             ]),
             ("Search & Filters", &[
                 ("search", "/", "Search"),
