@@ -277,6 +277,13 @@ pub enum IpcCommand {
         account: Option<String>,
     },
     Quit,
+    MuCommand {
+        sexp: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        muhome: Option<String>,
+    },
 }
 
 /// Response sent back to IPC clients.
@@ -828,6 +835,19 @@ mod tests {
             let json2 = serde_json::to_string(&parsed).unwrap();
             assert_eq!(json, json2);
         }
+    }
+
+    #[test]
+    fn test_mu_command_serde() {
+        let cmd = IpcCommand::MuCommand {
+            sexp: "(ping)".to_string(),
+            account: Some("work".to_string()),
+            muhome: None,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let parsed: IpcCommand = serde_json::from_str(&json).unwrap();
+        let json2 = serde_json::to_string(&parsed).unwrap();
+        assert_eq!(json, json2);
     }
 
     #[test]

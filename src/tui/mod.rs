@@ -1782,6 +1782,26 @@ impl App {
         }
     }
 
+    /// Resolve account index from optional account name / muhome path.
+    /// muhome takes precedence. Returns None if specified but not found,
+    /// Some(active_account) if neither specified.
+    fn resolve_mu_target(&self, account: Option<&str>, muhome: Option<&str>) -> Option<usize> {
+        if let Some(mh) = muhome {
+            for (idx, _acct) in self.config.accounts.iter().enumerate() {
+                if let Some(effective) = self.config.effective_muhome(idx) {
+                    if effective == mh {
+                        return Some(idx);
+                    }
+                }
+            }
+            return None;
+        }
+        if let Some(name) = account {
+            return self.config.accounts.iter().position(|a| a.name == *name);
+        }
+        Some(self.active_account)
+    }
+
     async fn handle_ipc_command(&mut self, cmd: IpcCommand) -> Result<IpcResponse> {
         debug_log!("handle_ipc_command: {:?}", cmd);
         match cmd {
@@ -1883,6 +1903,49 @@ impl App {
             IpcCommand::Quit => {
                 self.should_quit = true;
                 Ok(IpcResponse::Ok)
+            }
+            IpcCommand::MuCommand { sexp, account, muhome } => {
+                let target_idx = self.resolve_mu_target(account.as_deref(), muhome.as_deref());
+                match target_idx {
+                    Some(idx) => {
+                        if idx == self.active_account && self.indexing {
+                            return Ok(IpcResponse::Error {
+                                message: "mu server is busy (indexing)".to_string(),
+                            });
+                        }
+                        let mu = if idx == self.active_account {
+                            &mut self.mu
+                        } else {
+                            match self.background_mu.get_mut(&idx) {
+                                Some(mu) => mu,
+                                None => return Ok(IpcResponse::Error {
+                                    message: format!(
+                                        "no mu server for account '{}'",
+                                        self.config.accounts.get(idx)
+                                            .map(|a| a.name.as_str()).unwrap_or("?")
+                                    ),
+                                }),
+                            }
+                        };
+                        match mu.send_raw(&sexp).await {
+                            Ok(frames) => {
+                                if sexp.starts_with("(move")
+                                    || sexp.starts_with("(remove")
+                                    || sexp.starts_with("(index")
+                                {
+                                    self.invalidate_folder_cache();
+                                }
+                                Ok(IpcResponse::MuFrames { frames })
+                            }
+                            Err(e) => Ok(IpcResponse::Error {
+                                message: format!("mu error: {}", e),
+                            }),
+                        }
+                    }
+                    None => Ok(IpcResponse::Error {
+                        message: "no matching account for muhome/account".to_string(),
+                    }),
+                }
             }
         }
     }
