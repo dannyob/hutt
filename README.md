@@ -18,6 +18,12 @@ backend and expects a Maildir-synced mailbox (via
 - **Quick filters** — toggle unread (U), starred (S), needs-reply (R)
 - **Folder switching** — `gi` for inbox, `ga` for archive, `gl` for picker, etc.
 - **Thread view** — expand/collapse messages in a conversation
+- **Conversations mode** — group messages by thread in the message list
+- **Split inbox** — partition your inbox by query (e.g. GitHub, newsletters, VIPs)
+- **Smart folders** — saved mu searches as virtual folders
+- **Multi-account** — switch between accounts with `gTab` or the tab bar
+- **Tab bar** — clickable folder tabs with mouse support
+- **Mouse support** — click tabs to navigate, drag border to resize panes
 - **Compose** — new messages, reply, reply-all, forward via your `$EDITOR`
 - **SMTP sending** — send mail directly from the TUI via STARTTLS/TLS/plain
 - **Linkability** — `hutt://` URL scheme, copy message URLs, open in browser
@@ -77,6 +83,145 @@ hutt              # opens /Inbox
 hutt /Sent        # opens a specific folder
 ```
 
+## Split Inbox
+
+Split inbox partitions your inbox into focused sub-views using mu
+queries — similar to Superhuman's split inbox feature. Each split
+removes matching messages from the main Inbox view and shows them in
+their own tab.
+
+Splits are defined per-account in `~/.config/hutt/splits.<account>.toml`:
+
+```toml
+[[splits]]
+name = "GitHub"
+query = "from:notifications@github.com"
+
+[[splits]]
+name = "Newsletters"
+query = "from:substack.com or from:noreply@medium.com"
+
+[[splits]]
+name = "Starred"
+query = "flag:flagged"
+```
+
+Split tabs appear in the tab bar with a `#` prefix (e.g. `#GitHub`).
+You can also create and delete splits from within hutt:
+
+- **Create**: `Ctrl+k` → "Create Split", or use the command palette
+- **Delete**: open the folder picker (`gl`), navigate to a `#split`,
+  press `d`
+- **Undo delete**: press `z`
+
+Splits use client-side filtering — queries run at startup and after
+each reindex, caching matching message IDs. The inbox view excludes
+anything that matches any split. Splits may overlap; a message can
+appear in multiple splits.
+
+### Importing from Superhuman
+
+If you're migrating from Superhuman, the included import script can
+extract your split definitions:
+
+```sh
+# Show all splits from all accounts
+python3 scripts/superhuman-import.py
+
+# Export as hutt TOML for a specific account
+python3 scripts/superhuman-import.py --account user@example.com --hutt
+
+# Include disabled splits too
+python3 scripts/superhuman-import.py --include-disabled --hutt
+```
+
+The script reads Superhuman's local SQLite databases and converts
+queries to mu syntax where possible (e.g. `is:starred` → `flag:flagged`,
+`filename:ics` → `mime:text/calendar`). Superhuman-specific features
+like `is:shared` and ML-based classifiers are flagged as untranslatable.
+
+## Smart Folders
+
+Smart folders are saved mu searches that appear as virtual folders.
+They're stored per-account in `~/.config/hutt/smart-folders/<account>/`.
+
+Smart folder tabs appear with an `@` prefix (e.g. `@Unread today`).
+
+- **Create**: `Ctrl+k` → "Create Smart Folder"
+- **Delete**: folder picker (`gl`) → navigate to `@folder` → press `d`
+
+## Multi-Account
+
+Configure multiple accounts in your config file:
+
+```toml
+[[accounts]]
+name = "work"
+email = "you@work.com"
+maildir = "~/Mail/work"
+default = true
+# ...
+
+[[accounts]]
+name = "personal"
+email = "you@example.com"
+maildir = "~/Mail/personal"
+# ...
+```
+
+Switch accounts with:
+- `gA` — open account picker popup
+- `gTab` / `gShift+Tab` — cycle to next/previous account
+- Click the account name in the tab bar
+
+Each account has its own mu database, folders, splits, and smart
+folders. Set `muhome` per-account if they use separate mu databases.
+
+## Tab Bar
+
+The top bar shows clickable folder tabs:
+
+```
+ work  /Inbox  #GitHub  #Newsletters  /Archive  /Sent  @Unread  …
+```
+
+- **Account badge** (left) — click to open account picker
+- **Inbox** — always pinned on the left
+- **Folder tabs** — click to navigate; `Tab`/`Shift+Tab` to cycle
+- **Overflow `…`** (right) — click to open the full folder picker
+
+Tabs are color-coded: splits (`#`) in cyan, smart folders (`@`) in
+yellow, maildir folders (`/`) in white. The selected tab is highlighted
+in blue.
+
+### Configuring Tab Order
+
+Customize which tabs appear and in what order per-account:
+
+```toml
+[[accounts]]
+name = "work"
+tabs = ["/Inbox", "#GitHub", "#Newsletters", "#", "/Archive", "/Sent", "@"]
+# ...
+```
+
+Wildcards expand to "remaining items of this type":
+- `"/"` — all remaining maildir folders not explicitly listed
+- `"#"` — all remaining splits not explicitly listed
+- `"@"` — all remaining smart folders not explicitly listed
+
+Default when `tabs` is omitted: `["/Inbox", "#", "/", "@"]`
+
+## Mouse Support
+
+hutt supports mouse interaction:
+
+- **Tab bar** — click any tab to navigate to that folder
+- **Account badge** — click to open the account picker
+- **Overflow `…`** — click to open the folder picker
+- **Border drag** — drag the border between the message list and
+  preview pane to resize (hold left click and drag)
+
 ## Keyboard Shortcuts
 
 Press `?` inside hutt for the full interactive reference. Press `Ctrl+k`
@@ -108,17 +253,22 @@ to open the command palette and fuzzy-search any action.
 | `s` | Toggle star         |
 | `z` | Undo last action    |
 
-### Folders
+### Folders & Tabs
 
-| Key  | Action          |
-|------|-----------------|
-| `gi` | Go to Inbox     |
-| `ga` | Go to Archive   |
-| `gd` | Go to Drafts    |
-| `gt` | Go to Sent      |
-| `g#` | Go to Trash     |
-| `g!` | Go to Spam      |
-| `gl` | Folder picker   |
+| Key            | Action              |
+|----------------|---------------------|
+| `gi`           | Go to Inbox         |
+| `ga`           | Go to Archive       |
+| `gd`           | Go to Drafts        |
+| `gt`           | Go to Sent          |
+| `g#`           | Go to Trash         |
+| `g!`           | Go to Spam          |
+| `gl`           | Folder picker       |
+| `Tab`          | Next tab            |
+| `Shift+Tab`    | Previous tab        |
+| `gA`           | Account picker      |
+| `gTab`         | Next account        |
+| `gShift+Tab`   | Previous account    |
 
 ### Search & Filters
 
@@ -292,15 +442,19 @@ src/
 ├── send.rs           SMTP sending via lettre
 ├── links.rs          URL scheme, clipboard, IPC socket
 ├── undo.rs           Undo stack for triage actions
+├── splits.rs         Split inbox persistence (per-account TOML)
+├── smart_folders.rs  Smart folder persistence
 └── tui/
     ├── mod.rs            App state, action dispatch, main loop
     ├── envelope_list.rs  Message list widget
     ├── preview.rs        Message preview pane
-    ├── status_bar.rs     Top bar (folder/counts) and bottom bar (hints)
+    ├── status_bar.rs     Tab bar, bottom status bar
     ├── thread_view.rs    Thread conversation widget
     ├── folder_picker.rs  Folder picker popup
     ├── command_palette.rs Command palette popup
     └── help_overlay.rs   Keyboard shortcut reference
+scripts/
+└── superhuman-import.py  Extract split inbox config from Superhuman
 macos/
 ├── hutt-opener.applescript   AppleScript URL event handler
 └── hutt-opener/Contents/     .app bundle template (Info.plist + shell script)
