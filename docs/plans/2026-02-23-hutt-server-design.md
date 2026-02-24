@@ -42,12 +42,17 @@ MuCommand {
     sexp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    muhome: Option<String>,
 }
 ```
 
 When hutt receives `MuCommand`:
 
-1. Look up the `MuClient` for the requested account (or active account)
+1. Resolve the target mu server: match `muhome` against account configs first,
+   then `account` by name, then fall back to active account. If no match,
+   return `Error { message: "no matching account" }` (the shim will fall back
+   to standalone mu).
 2. If an index operation is in progress, queue the command until it finishes
 3. Forward the raw S-expression string to mu via `send()`
 4. Read frames until a terminal frame (`:found`, `:update`, `:pong`, `:error`,
@@ -72,8 +77,17 @@ Options:
   --account <name>        Route commands to a specific account's mu server
 ```
 
-`--muhome` is accepted but ignored (hutt already knows each account's muhome).
-`--account` maps to the `account` field in `MuCommand`.
+`--muhome` and `--account` are alternative ways to pick which mu server to use.
+`--muhome` matches against each account's configured muhome path. `--account`
+matches by name. If both are given, `--muhome` takes precedence.
+
+### Fallback to standalone mu server
+
+If hutt isn't running, or the `--muhome` doesn't match any account hutt knows
+about, `hutt server` falls back to spawning `mu server` directly with the
+original command-line arguments. This makes `hutt server` a complete drop-in
+replacement for `mu server` — it proxies through hutt when possible, and
+runs mu standalone when not.
 
 ### Interactive mode (default)
 
@@ -98,9 +112,11 @@ Options:
 
 ### Error handling
 
-- If hutt isn't running (can't connect to IPC socket): print error to stderr,
-  exit non-zero
-- If IPC returns `Error`: print to stderr, continue (interactive) or exit
+- If hutt isn't running (can't connect to IPC socket): fall back to
+  `mu server` with the original command-line args
+- If IPC returns `Error` with "no matching account": fall back to
+  `mu server` with the original command-line args
+- Other `Error` responses: print to stderr, continue (interactive) or exit
   (eval mode)
 
 ## Wire format
@@ -128,5 +144,3 @@ event loop ticks. Proxy commands queue behind indexing until it completes.
 ## What's NOT in scope
 
 - Multiple simultaneous proxy clients (one at a time is fine)
-- Proxying to accounts hutt doesn't know about
-- Replacing mu's own `mu server` for non-hutt use cases
