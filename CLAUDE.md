@@ -46,7 +46,7 @@ Each widget is a separate module: `envelope_list` (message list), `preview` (mes
 - **Compose** (`compose.rs`): Launches external editor, builds RFC 2822 messages. TUI suspends during editing.
 - **SMTP** (`send.rs`): Sends via `lettre` with STARTTLS/SSL/OAuth2 support.
 - **MIME rendering** (`mime_render.rs`): `RenderCache` caches rendered bodies keyed by (message_id, terminal_width). Uses `mail-parser` + `html2text`.
-- **IPC/URL scheme** (`links.rs`): Unix socket at `$XDG_RUNTIME_DIR/hutt.sock` handles `hutt://` URLs for external integration (open message, search, compose).
+- **URI schemes** (`links.rs`): Accepts `mid:` (RFC 2392), `message:` (Apple Mail), `mailto:` (RFC 6068), and `hutt:` (app-specific search/navigate). Unix socket IPC at `$XDG_RUNTIME_DIR/hutt.sock`. All IPC commands accept optional `account` parameter. Legacy `hutt://` URLs accepted for backwards compatibility.
 - **Smart folders** (`smart_folders.rs`): Saved mu queries, persisted as TOML in `~/.config/hutt/smart-folders/`.
 - **Split inbox** (`splits.rs`): Inbox partitioning by query. Splits are persisted per-account as `~/.config/hutt/splits.<account>.toml`. Split queries run eagerly at startup/reindex, caching matched docids in `HashSet<u32>`. Inbox view excludes matched messages. `#` prefix in folder names.
 - **Tab bar** (`tui/status_bar.rs` `TopBar`): Clickable folder tabs replacing the old top bar. Renders account badge, pinned inbox, scrollable tabs, overflow button. `TabRegion`/`TabRegionKind` structs enable mouse hit testing. Tab order configurable via `tabs` account config field with `/`, `#`, `@` wildcards.

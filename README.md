@@ -26,7 +26,7 @@ backend and expects a Maildir-synced mailbox (via
 - **Mouse support** — click tabs to navigate, drag border to resize panes
 - **Compose** — new messages, reply, reply-all, forward via your `$EDITOR`
 - **SMTP sending** — send mail directly from the TUI via STARTTLS/TLS/plain
-- **Linkability** — `hutt://` URL scheme, copy message URLs, open in browser
+- **Linkability** — `mid:`, `message:`, `mailto:`, `hutt:` URI schemes; IPC; copy message URLs
 - **Command palette** — Ctrl+k to fuzzy-search all available actions
 - **Help overlay** — press `?` for a full shortcut reference
 
@@ -79,9 +79,15 @@ password_command = "pass show email/smtp"
 ## Usage
 
 ```sh
-hutt              # opens /Inbox
-hutt /Sent        # opens a specific folder
+hutt                              # opens default account inbox
+hutt /Sent                        # opens a specific folder
+hutt -a work /Drafts              # opens Drafts on the 'work' account
+hutt r search from:alice          # search in the running instance
+hutt r search -a work from:alice  # search on a specific account
+hutt r open-url 'mid:abc@example.com?view=thread'  # open a thread via URI
 ```
+
+See `hutt --help` for full CLI documentation.
 
 ## Split Inbox
 
@@ -384,21 +390,39 @@ The plugin provides:
 - `:HuttDiscard` / `<leader>d` to cancel
 - Contact completion via `mu cfind` on To/Cc/Bcc lines (Ctrl+x Ctrl+o)
 
-## URL Scheme
+## URI Schemes
 
-hutt registers a `hutt://` URL scheme so you can open messages, threads,
-searches, and compose windows from outside the TUI. hutt must be running
+hutt uses standard URI schemes where they exist, with app-specific schemes
+only for operations no standard covers. hutt must be running for IPC
 (it listens on a Unix domain socket at `$XDG_RUNTIME_DIR/hutt.sock` or
 `/tmp/hutt-<uid>.sock`).
 
-Supported URLs:
+### Standard schemes
 
-| URL                                     | Action                  |
-|-----------------------------------------|-------------------------|
-| `hutt://message/<message-id>`           | Open a message          |
-| `hutt://thread/<message-id>`            | Open a thread           |
-| `hutt://search/<url-encoded-query>`     | Run a search            |
-| `hutt://compose?to=<addr>&subject=<s>`  | Open compose            |
+| URI                                     | Standard    | Action                  |
+|-----------------------------------------|-------------|-------------------------|
+| `mid:<message-id>`                      | RFC 2392    | Open a message          |
+| `mid:<message-id>?view=thread`          | RFC 2392    | Open a thread           |
+| `message:<message-id>`                  | IANA prov.  | Open a message (Apple Mail) |
+| `mailto:addr?subject=text`              | RFC 6068    | Compose                 |
+
+### App-specific schemes
+
+| URI                                              | Action                  |
+|--------------------------------------------------|-------------------------|
+| `hutt:search?q=<query>[&account=<name>]`         | Run a search            |
+| `hutt:navigate?folder=<path>[&account=<name>]`   | Switch to a folder      |
+
+The `account` parameter is optional — omit it to operate on the active
+account. For `mid:` and `message:` URLs, Message-IDs are globally unique
+(RFC 2822), so hutt searches all accounts.
+
+Legacy `hutt://` URLs (with `//`) are still accepted for backwards
+compatibility.
+
+### Copy to clipboard
+
+`y u` copies the current message's `mid:` URL. `y t` copies the thread URL.
 
 ### macOS
 
@@ -406,8 +430,7 @@ Supported URLs:
 make install-macos-handler
 ```
 
-Uses `osacompile` to build an AppleScript applet that receives macOS URL
-open events and delegates to the bundled IPC shell script.
+Installs a handler app for `mid:`, `message:`, and `hutt:` schemes.
 
 ### Linux (freedesktop / GNOME / KDE)
 
@@ -416,7 +439,7 @@ make install-linux-handler
 ```
 
 Installs `hutt-open` to `~/.local/bin/` and registers a `.desktop` file
-with `xdg-mime` as the handler for `x-scheme-handler/hutt`.
+with `xdg-mime` as the handler for `mid`, `message`, and `hutt` schemes.
 
 
 ## Debugging

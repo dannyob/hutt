@@ -26,6 +26,8 @@
             <key>CFBundleURLSchemes</key>
             <array>
                 <string>hutt</string>
+                <string>mid</string>
+                <string>message</string>
             </array>
         </dict>
     </array>
