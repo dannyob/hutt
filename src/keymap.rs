@@ -870,7 +870,7 @@ mod tests {
             global: [(
                 "G".to_string(),
                 BindingValue::Shell {
-                    shell: "mbsync work".to_string(),
+                    shell: "mbsync -a".to_string(),
                     reindex: true,
                     suspend: false,
                 },
@@ -888,7 +888,7 @@ mod tests {
         assert_eq!(
             action,
             Action::RunShell {
-                command: "mbsync work".to_string(),
+                command: "mbsync -a".to_string(),
                 reindex: true,
                 suspend: false,
             }
