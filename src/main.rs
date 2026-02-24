@@ -45,6 +45,9 @@ OPTIONS:
     --no-background-servers     Disable background mu servers
     --vim                       Vi-style editing in search/input fields
     --no-vim                    Emacs-style editing (default)
+    --sexp                      (remote) Print results as S-expressions
+    --json                      (remote) Print results as JSON (ndjson)
+    --wrapped                   (remote) Wrap output as single object
 
 REMOTE COMMANDS:
     open <MESSAGE-ID>           Open a message by Message-ID
@@ -73,6 +76,9 @@ EXAMPLES:
     hutt r search --account=work from:alice
     hutt r compose --to=bob@example.com --subject=\"Hello\"
     hutt r open-url 'mid:abc@example.com?view=thread'
+    hutt r --json search from:alice     Search and output ndjson
+    hutt r --sexp thread abc@host.com   Thread envelopes as sexp
+    hutt r --json search q | jq '.path' Extract file paths with jq
 
 ENVIRONMENT:
     HUTT_LOG=<path>             Debug log file (same as --log)
