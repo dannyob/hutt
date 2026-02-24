@@ -1446,6 +1446,30 @@ impl App {
         }
     }
 
+    fn select_all(&mut self) {
+        if self.conversations_mode {
+            // Collect all docids from all conversations
+            let all_docids: HashSet<u32> = self
+                .conversations
+                .iter()
+                .flat_map(|c| c.all_docids())
+                .collect();
+            if self.selected_set == all_docids {
+                // Toggle off: deselect all
+                self.selected_set.clear();
+            } else {
+                self.selected_set = all_docids;
+            }
+        } else {
+            let all_docids: HashSet<u32> = self.envelopes.iter().map(|e| e.docid).collect();
+            if self.selected_set == all_docids {
+                self.selected_set.clear();
+            } else {
+                self.selected_set = all_docids;
+            }
+        }
+    }
+
     // ── Compose helpers ─────────────────────────────────────────────
 
     fn build_compose_context(
@@ -1812,6 +1836,9 @@ impl App {
             Action::ToggleSelect => {
                 self.toggle_select();
                 self.move_down();
+            }
+            Action::SelectAll => {
+                self.select_all();
             }
             Action::SelectDown => {
                 self.toggle_select();
@@ -2384,6 +2411,14 @@ pub async fn run(mut app: App) -> Result<()> {
     terminal::enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
     io::stdout().execute(crossterm::event::EnableMouseCapture)?;
+
+    // Enable kitty keyboard protocol if available (gives us SUPER modifier, etc.)
+    // This is a no-op in terminals that don't support it.
+    let _ = io::stdout().execute(crossterm::event::PushKeyboardEnhancementFlags(
+        crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+            | crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+    ));
+
     let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -2660,6 +2695,7 @@ pub async fn run(mut app: App) -> Result<()> {
                                 .map(|(k, v)| (*k, v.as_str()))
                                 .collect();
 
+                            let _ = io::stdout().execute(crossterm::event::PopKeyboardEnhancementFlags);
                             io::stdout().execute(crossterm::event::DisableMouseCapture)?;
                             terminal::disable_raw_mode()?;
                             io::stdout().execute(LeaveAlternateScreen)?;
@@ -2703,6 +2739,10 @@ pub async fn run(mut app: App) -> Result<()> {
                             terminal::enable_raw_mode()?;
                             io::stdout().execute(EnterAlternateScreen)?;
                             io::stdout().execute(crossterm::event::EnableMouseCapture)?;
+                            let _ = io::stdout().execute(crossterm::event::PushKeyboardEnhancementFlags(
+                                crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                                    | crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+                            ));
                             terminal.clear()?;
 
                             match send_result {
@@ -2726,6 +2766,7 @@ pub async fn run(mut app: App) -> Result<()> {
 
         // Handle suspended shell command (like compose, needs terminal suspend/resume)
         if let Some(pending) = app.shell_pending.take() {
+            let _ = io::stdout().execute(crossterm::event::PopKeyboardEnhancementFlags);
             io::stdout().execute(crossterm::event::DisableMouseCapture)?;
             terminal::disable_raw_mode()?;
             io::stdout().execute(LeaveAlternateScreen)?;
@@ -2737,6 +2778,10 @@ pub async fn run(mut app: App) -> Result<()> {
             terminal::enable_raw_mode()?;
             io::stdout().execute(EnterAlternateScreen)?;
             io::stdout().execute(crossterm::event::EnableMouseCapture)?;
+            let _ = io::stdout().execute(crossterm::event::PushKeyboardEnhancementFlags(
+                crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                    | crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+            ));
             terminal.clear()?;
 
             match status {
@@ -3084,6 +3129,7 @@ pub async fn run(mut app: App) -> Result<()> {
         }
     }
 
+    let _ = io::stdout().execute(crossterm::event::PopKeyboardEnhancementFlags);
     io::stdout().execute(crossterm::event::DisableMouseCapture)?;
     terminal::disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
