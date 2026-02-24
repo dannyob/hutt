@@ -2467,8 +2467,7 @@ pub async fn run(mut app: App) -> Result<()> {
     // Enable kitty keyboard protocol if available (gives us SUPER modifier, etc.)
     // This is a no-op in terminals that don't support it.
     let _ = io::stdout().execute(crossterm::event::PushKeyboardEnhancementFlags(
-        crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-            | crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+        crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
     ));
 
     let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
@@ -2792,8 +2791,7 @@ pub async fn run(mut app: App) -> Result<()> {
                             io::stdout().execute(EnterAlternateScreen)?;
                             io::stdout().execute(crossterm::event::EnableMouseCapture)?;
                             let _ = io::stdout().execute(crossterm::event::PushKeyboardEnhancementFlags(
-                                crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-                                    | crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+                                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
                             ));
                             terminal.clear()?;
 
@@ -2831,8 +2829,7 @@ pub async fn run(mut app: App) -> Result<()> {
             io::stdout().execute(EnterAlternateScreen)?;
             io::stdout().execute(crossterm::event::EnableMouseCapture)?;
             let _ = io::stdout().execute(crossterm::event::PushKeyboardEnhancementFlags(
-                crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-                    | crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
             ));
             terminal.clear()?;
 
