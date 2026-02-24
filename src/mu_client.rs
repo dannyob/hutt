@@ -66,6 +66,23 @@ impl FrameReader {
             self.buf.extend_from_slice(&tmp[..n]);
         }
     }
+
+    /// Like next_frame, but also returns the raw sexp string as received from mu.
+    async fn next_frame_raw(&mut self) -> Result<(Value, String)> {
+        loop {
+            if let Some((value, raw, consumed)) = mu_sexp::read_frame_raw(&self.buf)? {
+                self.buf.drain(..consumed);
+                return Ok((value, raw));
+            }
+
+            let mut tmp = [0u8; 8192];
+            let n = self.stdout.read(&mut tmp).await?;
+            if n == 0 {
+                bail!("mu server closed stdout");
+            }
+            self.buf.extend_from_slice(&tmp[..n]);
+        }
+    }
 }
 
 pub struct FindOpts {
@@ -412,6 +429,34 @@ impl MuClient {
         }
         mu_log!("index: unexpected response, skipping");
         Ok(false)
+    }
+
+    /// Send a raw S-expression command and collect all response frames
+    /// as raw strings until a terminal frame.
+    /// Skips :erase frames. Used for MuCommand proxying.
+    pub async fn send_raw(&mut self, sexp: &str) -> Result<Vec<String>> {
+        self.send(sexp).await?;
+        let mut frames = Vec::new();
+        loop {
+            let (value, raw) = self.reader.next_frame_raw().await?;
+            if mu_sexp::is_erase(&value) {
+                continue;
+            }
+            let is_terminal = mu_sexp::is_found(&value).is_some()
+                || mu_sexp::is_pong(&value)
+                || mu_sexp::is_error(&value).is_some()
+                || mu_sexp::is_update(&value)
+                || mu_sexp::plist_get_u32(&value, "remove").is_some()
+                || mu_sexp::plist_get(&value, "index").is_some()
+                || (mu_sexp::plist_get(&value, "info").is_some()
+                    && mu_sexp::plist_get(&value, "status")
+                        .and_then(|v| v.as_symbol()) == Some("complete"));
+            frames.push(raw);
+            if is_terminal {
+                break;
+            }
+        }
+        Ok(frames)
     }
 
     pub async fn quit(&mut self) -> Result<()> {

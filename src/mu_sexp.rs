@@ -71,6 +71,40 @@ pub fn encode_frame(sexp: &str) -> Vec<u8> {
     buf
 }
 
+/// Like read_frame, but also returns the raw S-expression string.
+/// Returns (parsed Value, raw sexp string, bytes consumed).
+pub fn read_frame_raw(buf: &[u8]) -> Result<Option<(Value, String, usize)>> {
+    let start = match buf.iter().position(|&b| b == 0xfe) {
+        Some(pos) => pos,
+        None => return Ok(None),
+    };
+
+    let sep = match buf[start + 1..].iter().position(|&b| b == 0xff) {
+        Some(pos) => start + 1 + pos,
+        None => return Ok(None),
+    };
+
+    let hex_str = std::str::from_utf8(&buf[start + 1..sep])
+        .context("invalid utf-8 in frame length")?;
+    let length =
+        usize::from_str_radix(hex_str, 16).context("invalid hex length in frame")?;
+
+    let data_start = sep + 1;
+    let data_end = data_start + length;
+
+    if buf.len() < data_end {
+        return Ok(None);
+    }
+
+    let sexp_bytes = &buf[data_start..data_end];
+    let sexp_str =
+        std::str::from_utf8(sexp_bytes).context("invalid utf-8 in sexp data")?;
+    let raw = sexp_str.to_string();
+    let value = parse_sexp(sexp_str)?;
+
+    Ok(Some((value, raw, data_end)))
+}
+
 fn truncate(s: &str, max: usize) -> &str {
     if s.len() <= max {
         s
@@ -526,6 +560,16 @@ mod tests {
     #[test]
     fn test_is_found() {
         let value = parse_sexp("(:found 3 :query \"\" :maxnum 3)").unwrap();
+        assert_eq!(is_found(&value), Some(3));
+    }
+
+    #[test]
+    fn test_read_frame_raw() {
+        let sexp = "(:found 3 :query \"test\")";
+        let encoded = encode_frame(sexp);
+        let (value, raw, consumed) = read_frame_raw(&encoded).unwrap().unwrap();
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(raw, sexp);
         assert_eq!(is_found(&value), Some(3));
     }
 
