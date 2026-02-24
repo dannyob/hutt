@@ -240,10 +240,11 @@ pub struct App {
     pub creating_split: bool,                      // true = create-flow saves as split
     pub editing_folder: Option<String>,            // Some("#name") or Some("@name") when editing
 
-    // Smart folder creation
+    // Smart folder / split creation & editing
     pub smart_create_query: String,
     pub smart_create_name: String,
     pub smart_create_phase: u8, // 0 = query, 1 = name
+    pub smart_create_textarea: TextArea<'static>,
     pub smart_create_preview: Vec<String>, // subject lines
     pub smart_create_count: Option<u32>,
 
@@ -663,6 +664,7 @@ impl App {
             smart_create_query: String::new(),
             smart_create_name: String::new(),
             smart_create_phase: 0,
+            smart_create_textarea: new_search_textarea(""),
             smart_create_preview: Vec::new(),
             smart_create_count: None,
             maildir_create_input: String::new(),
@@ -1341,6 +1343,16 @@ impl App {
         }
     }
 
+    /// Initialize the smart_create_textarea for the current phase.
+    fn init_smart_create_textarea(&mut self) {
+        let text = if self.smart_create_phase == 0 {
+            &self.smart_create_query
+        } else {
+            &self.smart_create_name
+        };
+        self.smart_create_textarea = new_search_textarea(text);
+    }
+
     /// Open the query editor for a @smart or #split folder.
     async fn edit_folder(&mut self, folder: &str) {
         if let Some(name) = folder.strip_prefix('@') {
@@ -1352,6 +1364,7 @@ impl App {
                 self.smart_create_count = None;
                 self.creating_split = false;
                 self.editing_folder = Some(folder.to_string());
+                self.init_smart_create_textarea();
                 self.update_smart_create_preview().await;
                 self.mode = InputMode::SmartFolderCreate;
             }
@@ -1364,6 +1377,7 @@ impl App {
                 self.smart_create_count = None;
                 self.creating_split = true;
                 self.editing_folder = Some(folder.to_string());
+                self.init_smart_create_textarea();
                 self.update_smart_create_preview().await;
                 self.mode = InputMode::SmartFolderCreate;
             }
@@ -2166,6 +2180,7 @@ impl App {
                 self.smart_create_preview.clear();
                 self.smart_create_count = None;
                 self.creating_split = true;
+                self.init_smart_create_textarea();
                 self.mode = InputMode::SmartFolderCreate;
             }
 
@@ -2190,13 +2205,8 @@ impl App {
                     self.palette_filter.push(c);
                     self.palette_selected = 0;
                 }
-                InputMode::SmartFolderCreate => {
-                    self.smart_create_query.push(c);
-                    self.update_smart_create_preview().await;
-                }
-                InputMode::SmartFolderName => {
-                    self.smart_create_name.push(c);
-                }
+                InputMode::SmartFolderCreate => {} // handled by textarea in event loop
+                InputMode::SmartFolderName => {} // handled by textarea in event loop
                 InputMode::MaildirCreate => {
                     self.maildir_create_input.push(c);
                 }
@@ -2216,13 +2226,8 @@ impl App {
                     self.palette_filter.pop();
                     self.palette_selected = 0;
                 }
-                InputMode::SmartFolderCreate => {
-                    self.smart_create_query.pop();
-                    self.update_smart_create_preview().await;
-                }
-                InputMode::SmartFolderName => {
-                    self.smart_create_name.pop();
-                }
+                InputMode::SmartFolderCreate => {} // handled by textarea in event loop
+                InputMode::SmartFolderName => {} // handled by textarea in event loop
                 InputMode::MaildirCreate => {
                     self.maildir_create_input.pop();
                 }
@@ -2246,6 +2251,7 @@ impl App {
                             self.smart_create_preview.clear();
                             self.smart_create_count = None;
                             self.creating_split = false;
+                            self.init_smart_create_textarea();
                             self.mode = InputMode::SmartFolderCreate;
                         } else if folder == "+ New split" {
                             self.smart_create_query.clear();
@@ -2254,6 +2260,7 @@ impl App {
                             self.smart_create_preview.clear();
                             self.smart_create_count = None;
                             self.creating_split = true;
+                            self.init_smart_create_textarea();
                             self.mode = InputMode::SmartFolderCreate;
                         } else if folder == "+ New maildir folder" {
                             self.maildir_create_input.clear();
@@ -2279,6 +2286,7 @@ impl App {
                             self.smart_create_name = self.smart_create_query.clone();
                         }
                         self.smart_create_phase = 1;
+                        self.init_smart_create_textarea();
                         self.mode = InputMode::SmartFolderName;
                     }
                 }
@@ -2407,8 +2415,10 @@ impl App {
                     self.mode = InputMode::FolderPicker;
                 }
                 InputMode::SmartFolderName => {
-                    // Go back to query phase
+                    // Sync name back before going to query phase
+                    self.smart_create_name = self.smart_create_textarea.lines()[0].clone();
                     self.smart_create_phase = 0;
+                    self.init_smart_create_textarea();
                     self.mode = InputMode::SmartFolderCreate;
                 }
                 InputMode::MaildirCreate => {
@@ -2825,7 +2835,10 @@ pub async fn run(mut app: App) -> Result<()> {
                         (None, false) => "New Smart Folder",
                     },
                 };
+                let ta_area = popup.textarea_area(size);
                 frame.render_widget(popup, size);
+                // Render textarea over the active field
+                frame.render_widget(&app.smart_create_textarea, ta_area);
             }
             if app.mode == InputMode::MaildirCreate {
                 let popup = folder_picker::MaildirCreatePopup {
@@ -3474,6 +3487,55 @@ pub async fn run(mut app: App) -> Result<()> {
                             // Pass everything else to the textarea
                             app.search_textarea.input(input);
                             app.search_input = app.search_textarea.lines()[0].clone();
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Smart folder/split create/edit: route events to textarea
+            if matches!(app.mode, InputMode::SmartFolderCreate | InputMode::SmartFolderName) {
+                let input: Input = key.into();
+                match input {
+                    Input { key: Key::Esc, .. } => {
+                        // Sync textarea back before cancel/back
+                        let text = app.smart_create_textarea.lines()[0].clone();
+                        if app.smart_create_phase == 0 {
+                            app.smart_create_query = text;
+                        } else {
+                            app.smart_create_name = text;
+                        }
+                        let action = app.keymap.handle(key, &app.mode);
+                        if let Err(e) = app.handle_action(action).await {
+                            app.set_status(format!("Error: {}", e));
+                        }
+                    }
+                    Input { key: Key::Enter, .. } => {
+                        // Sync textarea back before submit
+                        let text = app.smart_create_textarea.lines()[0].clone();
+                        if app.smart_create_phase == 0 {
+                            app.smart_create_query = text;
+                        } else {
+                            app.smart_create_name = text;
+                        }
+                        let action = app.keymap.handle(key, &app.mode);
+                        if let Err(e) = app.handle_action(action).await {
+                            app.set_status(format!("Error: {}", e));
+                        }
+                    }
+                    Input { key: Key::Char('c'), ctrl: true, .. } => {
+                        if let Err(e) = app.handle_action(Action::Quit).await {
+                            app.set_status(format!("Error: {}", e));
+                        }
+                    }
+                    _ => {
+                        app.smart_create_textarea.input(input);
+                        let text = app.smart_create_textarea.lines()[0].clone();
+                        if app.smart_create_phase == 0 {
+                            app.smart_create_query = text;
+                            app.update_smart_create_preview().await;
+                        } else {
+                            app.smart_create_name = text;
                         }
                     }
                 }
