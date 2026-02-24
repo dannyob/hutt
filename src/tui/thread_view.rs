@@ -17,7 +17,10 @@ pub struct ThreadView<'a> {
     pub messages: &'a [ThreadMessage],
     pub selected: usize,
     pub scroll: u16,
+    pub raw_headers: Option<&'a HashMap<String, Vec<(String, String)>>>,
 }
+
+use std::collections::HashMap;
 
 impl<'a> Widget for ThreadView<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
@@ -87,9 +90,32 @@ impl<'a> Widget for ThreadView<'a> {
                 msg_index: Some(idx),
             });
 
-            // If expanded, show body (with word wrap)
+            // If expanded, show headers (if toggled) then body
             if msg.expanded {
                 let wrap_width = area.width.saturating_sub(2) as usize; // 1 char padding each side
+
+                // Show raw headers if available
+                if let Some(headers_map) = self.raw_headers {
+                    if let Some(headers) = headers_map.get(&msg.envelope.message_id) {
+                        let label_style = header_base.fg(Color::DarkGray);
+                        let val_style = header_base.fg(Color::White);
+                        for (name, value) in headers {
+                            let label = format!("{}: ", name);
+                            lines.push(RenderedLine {
+                                content: vec![
+                                    (label, label_style),
+                                    (value.clone(), val_style),
+                                ],
+                                msg_index: Some(idx),
+                            });
+                        }
+                        lines.push(RenderedLine {
+                            content: Vec::new(),
+                            msg_index: Some(idx),
+                        });
+                    }
+                }
+
                 if let Some(ref body) = msg.body {
                     for line in body.lines() {
                         let style = if line.starts_with('>') {
