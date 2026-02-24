@@ -64,3 +64,12 @@ Crossterm mouse capture enabled during normal operation (disabled during compose
 - Async runtime: Tokio multi-thread
 - All triage actions must be reversible (push to `UndoStack`)
 - Keybindings are config-driven with hardcoded defaults as fallback
+
+## Tech Debt / Refactoring Notes
+
+`tui/mod.rs` is ~2800 lines and growing. Not urgent but watch for these when next touching nearby code:
+
+- **Extract rendering**: The draw closure in `run()` is ~200 lines mixing widget construction with inline popup rendering (e.g. AccountPicker uses local `use` imports of ratatui types). Could become a standalone `render()` function.
+- **Generic list picker**: The popup input handling in `run()` repeats the same Down/Up/Enter/Esc pattern for FolderPicker, MoveToFolder, CommandPalette, and AccountPicker. Could be a shared list-navigation helper.
+- **App sub-structs**: `App` has 60+ pub fields. Smart folder creation (5 fields), split state (4 fields), tab bar state (4 fields) are candidates for grouping into sub-structs.
+- **Splits ↔ smart folders duplication**: Create, delete, and undo-restore flows for splits and smart folders are near-identical (~20 lines each). Could share a trait or helper if a third "virtual folder" type is added.
