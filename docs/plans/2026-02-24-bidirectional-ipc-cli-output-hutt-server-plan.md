@@ -12,6 +12,12 @@
 - `docs/plans/2026-02-24-cli-output-design.md`
 - `docs/plans/2026-02-23-hutt-server-design.md`
 
+**Key design decisions:**
+- `find()` delegates to `find_capturing()` internally — no code duplication
+- IPC handlers keep calling `load_folder()` / `navigate_folder()` / `open_thread()` for correct TUI state, then do a second `find_capturing()` call for the IPC response data (IPC commands are infrequent CLI invocations, so the double query is fine)
+- `UnixStream` is passed through the mpsc channel directly — no oneshot channels or extra spawned tasks
+- `handle_ipc_command` returns `Result<IpcResponse>`; the two event loop call sites convert `Err` to `IpcResponse::Error` inline
+
 ---
 
 ## Phase 1: Bidirectional IPC
@@ -113,10 +119,10 @@ git commit -m "Add IpcResponse enum and encode_frame helper"
 
 ---
 
-### Task 2: Make IPC bidirectional
+### Task 2: Make IPC bidirectional (links.rs)
 
 **Files:**
-- Modify: `src/links.rs` (change `accept` to return stream, add `send_response`, update `send_ipc_command` to read response)
+- Modify: `src/links.rs` (change `accept` to return stream, add `send_response`, update `send_ipc_command` to read response, make `socket_path` public)
 
 **Step 1: Change `IpcListener::accept` to return stream alongside command**
 
@@ -151,7 +157,7 @@ pub async fn accept(&self) -> Result<(IpcCommand, UnixStream)> {
 
 **Step 2: Add `send_response` helper**
 
-Add after the `accept` method:
+Add after the `Drop` impl for `IpcListener`:
 
 ```rust
 /// Write a JSON-encoded `IpcResponse` to a stream.
@@ -210,15 +216,15 @@ Change `fn socket_path()` to `pub fn socket_path()` (around line 330).
 
 **Step 5: Run `cargo check`**
 
-Expected: compile errors in `src/tui/mod.rs` and `src/main.rs` because `accept` signature changed and `send_ipc_command` returns `IpcResponse` now. That's expected — we fix those in the next tasks.
+Expected: compile errors in `src/tui/mod.rs` and `src/main.rs` because signatures changed. Fixed in the next tasks.
 
-**Step 6: Commit (allow compile errors, will fix next)**
+**Step 6: Commit**
 
 ```bash
 git add src/links.rs
 git commit -m "Make IPC bidirectional: accept returns stream, send reads response
 
-Compile errors in tui/mod.rs and main.rs expected — fixed in next commits."
+Compile errors in tui/mod.rs and main.rs expected — fixed next."
 ```
 
 ---
@@ -230,7 +236,7 @@ Compile errors in tui/mod.rs and main.rs expected — fixed in next commits."
 
 **Step 1: Update imports**
 
-In `src/tui/mod.rs`, change the links import (line 33) to include `IpcResponse`:
+In `src/tui/mod.rs`, change the links import (line 33):
 
 ```rust
 use crate::links::{self, HuttUrl, IpcCommand, IpcListener, IpcResponse};
@@ -244,36 +250,21 @@ async fn handle_ipc_command(&mut self, cmd: IpcCommand) -> Result<()> {
 ```
 to:
 ```rust
-async fn handle_ipc_command(&mut self, cmd: IpcCommand) -> IpcResponse {
+async fn handle_ipc_command(&mut self, cmd: IpcCommand) -> Result<IpcResponse> {
 ```
 
-Wrap the existing body: each match arm that currently uses `?` and returns `Ok(())` should instead catch errors and return `IpcResponse::Error` or `IpcResponse::Ok`. The simplest approach — wrap the whole existing body in a helper closure and convert:
+Change every match arm's ending from bare (no return) to `Ok(IpcResponse::Ok)`:
 
-Replace the method body with:
+- `HuttUrl::Message` arm: add `Ok(IpcResponse::Ok)` at the end (after `self.set_status(...)`)
+- `HuttUrl::Thread` arm: add `Ok(IpcResponse::Ok)` at the end (both the found and not-found branches)
+- `HuttUrl::Search` arm: add `Ok(IpcResponse::Ok)` at the end
+- `HuttUrl::Compose` arm: add `Ok(IpcResponse::Ok)` at the end
+- `IpcCommand::Navigate` arm: add `Ok(IpcResponse::Ok)` at the end
+- `IpcCommand::Quit` arm: change to `self.should_quit = true; Ok(IpcResponse::Ok)`
 
-```rust
-async fn handle_ipc_command(&mut self, cmd: IpcCommand) -> IpcResponse {
-    debug_log!("handle_ipc_command: {:?}", cmd);
-    match self.handle_ipc_command_inner(cmd).await {
-        Ok(resp) => resp,
-        Err(e) => IpcResponse::Error { message: e.to_string() },
-    }
-}
+Remove the trailing `Ok(())` at the end of the function (each arm now returns).
 
-async fn handle_ipc_command_inner(&mut self, cmd: IpcCommand) -> Result<IpcResponse> {
-    // Move existing handle_ipc_command body here, but:
-    // - Change all bare Ok(()) at the end of each arm to Ok(IpcResponse::Ok)
-    // - Keep all ? operators as-is (they become Error via the outer wrapper)
-    // ... (existing match body) ...
-}
-```
-
-For the existing match arms, the changes are:
-- `IpcCommand::Open` → each sub-arm (`Message`, `Thread`, `Search`, `Compose`) ends with `Ok(IpcResponse::Ok)` instead of `Ok(())`
-- `IpcCommand::Navigate` → ends with `Ok(IpcResponse::Ok)`
-- `IpcCommand::Quit` → `self.should_quit = true; Ok(IpcResponse::Ok)`
-
-**Step 3: Change IPC channel type**
+**Step 3: Change IPC channel to carry `(IpcCommand, UnixStream)`**
 
 Around line 2668, change:
 ```rust
@@ -281,37 +272,24 @@ let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<IpcCommand>();
 ```
 to:
 ```rust
-let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<(IpcCommand, tokio::sync::oneshot::Sender<IpcResponse>)>();
+let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<(IpcCommand, tokio::net::UnixStream)>();
 ```
 
 **Step 4: Update IPC listener task**
 
-Replace the listener spawn block (around line 2670-2692):
+Replace the listener spawn block (around line 2670-2692). The task accepts the connection, reads the command, sends `(cmd, stream)` through the channel. The event loop writes the response after handling:
 
 ```rust
 Some(tokio::spawn(async move {
     debug_log!("IPC listener started");
     loop {
         match listener.accept().await {
-            Ok((cmd, mut stream)) => {
+            Ok((cmd, stream)) => {
                 debug_log!("IPC accepted: {:?}", cmd);
-                let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-                if tx.send((cmd, resp_tx)).is_err() {
+                if tx.send((cmd, stream)).is_err() {
                     debug_log!("IPC channel closed, exiting");
                     break;
                 }
-                // Spawn a task to wait for the response and send it back
-                tokio::spawn(async move {
-                    let resp = match resp_rx.await {
-                        Ok(resp) => resp,
-                        Err(_) => IpcResponse::Error {
-                            message: "internal: response channel dropped".to_string(),
-                        },
-                    };
-                    if let Err(e) = links::send_response(&mut stream, &resp).await {
-                        debug_log!("IPC response send error: {}", e);
-                    }
-                });
             }
             Err(e) => {
                 debug_log!("IPC accept error: {}", e);
@@ -320,11 +298,6 @@ Some(tokio::spawn(async move {
         }
     }
 }))
-```
-
-Note: the spawned task needs `IpcResponse` in scope. Add at the top of the `run()` function or inside the spawn block:
-```rust
-use crate::links::IpcResponse;
 ```
 
 **Step 5: Update drain loop**
@@ -340,10 +313,18 @@ while let Ok(cmd) = ipc_rx.try_recv() {
 ```
 to:
 ```rust
-while let Ok((cmd, resp_tx)) = ipc_rx.try_recv() {
+while let Ok((cmd, mut stream)) = ipc_rx.try_recv() {
     debug_log!("IPC drain: {:?}", cmd);
-    let resp = app.handle_ipc_command(cmd).await;
-    let _ = resp_tx.send(resp);
+    let resp = match app.handle_ipc_command(cmd).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            app.set_status(format!("IPC error: {}", e));
+            IpcResponse::Error { message: e.to_string() }
+        }
+    };
+    if let Err(e) = links::send_response(&mut stream, &resp).await {
+        debug_log!("IPC response error: {}", e);
+    }
 }
 ```
 
@@ -364,10 +345,18 @@ cmd = ipc_rx.recv() => {
 to:
 ```rust
 cmd = ipc_rx.recv() => {
-    if let Some((cmd, resp_tx)) = cmd {
+    if let Some((cmd, mut stream)) = cmd {
         debug_log!("IPC select: {:?}", cmd);
-        let resp = app.handle_ipc_command(cmd).await;
-        let _ = resp_tx.send(resp);
+        let resp = match app.handle_ipc_command(cmd).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                app.set_status(format!("IPC error: {}", e));
+                IpcResponse::Error { message: e.to_string() }
+            }
+        };
+        if let Err(e) = links::send_response(&mut stream, &resp).await {
+            debug_log!("IPC response error: {}", e);
+        }
     }
     continue;
 }
@@ -375,7 +364,7 @@ cmd = ipc_rx.recv() => {
 
 **Step 7: Run `cargo check`**
 
-Expected: should compile now (except main.rs — next task).
+Expected: should compile (except main.rs — next task).
 
 **Step 8: Commit**
 
@@ -383,8 +372,8 @@ Expected: should compile now (except main.rs — next task).
 git add src/tui/mod.rs
 git commit -m "Update TUI event loop for bidirectional IPC
 
-handle_ipc_command returns IpcResponse. Listener task sends response
-back on the stream via oneshot channel."
+handle_ipc_command returns Result<IpcResponse>. UnixStream passed
+through channel. Event loop writes response directly to stream."
 ```
 
 ---
@@ -427,20 +416,19 @@ git commit -m "Update run_remote to handle IpcResponse"
 
 ## Phase 2: CLI Output (`--sexp`, `--json`)
 
-### Task 5: Add `find_capturing` to MuClient
+### Task 5: Add `find_capturing` and make `find` delegate to it
 
 **Files:**
-- Modify: `src/mu_client.rs` (add `find_capturing` method)
+- Modify: `src/mu_client.rs` (add `find_capturing`, refactor `find` to use it)
 
-**Step 1: Add `find_capturing`**
+**Step 1: Rename existing `find` to `find_capturing`**
 
-Add after the existing `find` method (around line 270):
+Rename the existing `find` method (around line 233) to `find_capturing`. Change its return type from `Result<Vec<Envelope>>` to `Result<(Vec<Envelope>, Vec<String>)>`. In the body, add a `raw_sexps` vec and capture individual envelope sexp strings:
 
 ```rust
 /// Run a find query and collect envelopes plus individual raw sexp strings.
-/// Each string in the returned Vec is one envelope's sexp plist, suitable
-/// for --sexp output. The strings are re-serialized from the parsed Values
-/// (semantically identical to mu's output, formatting may differ slightly).
+/// Each string in the returned Vec is one envelope's sexp plist (re-serialized
+/// from the parsed Value — semantically identical to mu's output).
 pub async fn find_capturing(
     &mut self,
     query: &str,
@@ -478,7 +466,7 @@ pub async fn find_capturing(
         if mu_sexp::is_found(&value).is_some() {
             break;
         }
-        // Extract individual envelope Values from :headers list
+        // Extract individual envelopes from :headers list
         if let Some(headers) = mu_sexp::plist_get(&value, "headers") {
             if let Some(cons) = headers.as_cons() {
                 for pair in cons.iter() {
@@ -486,7 +474,7 @@ pub async fn find_capturing(
                     raw_sexps.push(env_value.to_string());
                     match mu_sexp::parse_envelope(env_value) {
                         Ok(env) => envelopes.push(env),
-                        Err(e) => mu_log!("find_capturing: parse error: {}", e),
+                        Err(e) => mu_log!("find_capturing: skip envelope: {}", e),
                     }
                 }
             }
@@ -496,27 +484,57 @@ pub async fn find_capturing(
 }
 ```
 
-**Step 2: Run `cargo check`**
+**Step 2: Add `find` as a thin wrapper**
 
-**Step 3: Commit**
+```rust
+/// Run a find query and collect all envelope results.
+pub async fn find(&mut self, query: &str, opts: &FindOpts) -> Result<Vec<Envelope>> {
+    let (envelopes, _) = self.find_capturing(query, opts).await?;
+    Ok(envelopes)
+}
+```
+
+**Step 3: Run `cargo test`**
+
+All existing tests should pass unchanged — `find` has the same signature and behavior.
+
+**Step 4: Commit**
 
 ```bash
 git add src/mu_client.rs
-git commit -m "Add find_capturing: returns envelopes + raw sexp strings"
+git commit -m "Add find_capturing, refactor find to delegate to it
+
+find_capturing returns (Vec<Envelope>, Vec<String>) where the strings
+are individual envelope sexp plists. find() is now a thin wrapper."
 ```
 
 ---
 
-### Task 6: Update `handle_ipc_command` to return MuFrames
+### Task 6: Return MuFrames from IPC envelope commands
 
 **Files:**
-- Modify: `src/tui/mod.rs` (change envelope-returning IPC commands to use `find_capturing`)
+- Modify: `src/tui/mod.rs` (update `handle_ipc_command` to capture and return sexp data)
 
-**Step 1: Update `handle_ipc_command_inner` for Message/Search/Navigate**
+The principle: each IPC handler keeps doing what it does today (load_folder, navigate_folder, open_thread) for correct TUI state, then does a second `find_capturing` call to get the raw sexp strings for the response.
 
-For `HuttUrl::Message` — after the existing `self.load_folder()` call, the envelopes are in `self.envelopes`. But we need raw sexps. Change the approach: instead of calling `self.load_folder()`, call `self.mu.find_capturing()` directly, then store the envelopes AND return the raw sexps.
+**Step 1: Add a helper method for IPC envelope capture**
 
-Replace the `HuttUrl::Message` arm in `handle_ipc_command_inner`:
+Add to `impl App`:
+
+```rust
+/// Run find_capturing to get raw sexp strings for IPC response.
+/// Separate from the TUI's own find/load_folder so TUI state is unaffected.
+async fn capture_envelopes(&mut self, query: &str, opts: &FindOpts) -> IpcResponse {
+    match self.mu.find_capturing(query, opts).await {
+        Ok((_envelopes, raw_sexps)) => IpcResponse::MuFrames { frames: raw_sexps },
+        Err(e) => IpcResponse::Error { message: format!("capture error: {}", e) },
+    }
+}
+```
+
+**Step 2: Update `HuttUrl::Message` arm**
+
+The current code sets `self.current_folder = query` then calls `self.load_folder()`. Keep that. After it, capture for the response:
 
 ```rust
 HuttUrl::Message { id, account } => {
@@ -525,41 +543,19 @@ HuttUrl::Message { id, account } => {
     debug_log!("IPC Message: query={}", query);
     self.mode = InputMode::Normal;
     self.thread_messages.clear();
-    let (envelopes, raw_sexps) = self.mu.find_capturing(
-        &query,
-        &FindOpts::default(),
-    ).await?;
-    debug_log!("IPC Message: loaded {} envelopes", envelopes.len());
-    self.envelopes = envelopes;
-    self.selected = 0;
-    self.current_folder = query;
-    self.set_status(format!("Opened message {}", id));
-    Ok(IpcResponse::MuFrames { frames: raw_sexps })
-}
-```
-
-Apply the same pattern for `HuttUrl::Search`:
-
-```rust
-HuttUrl::Search { query, account } => {
-    self.switch_to_account_if_needed(&account).await?;
-    debug_log!("IPC Search: query={}", query);
-    self.mode = InputMode::Normal;
-    self.thread_messages.clear();
-    let (envelopes, raw_sexps) = self.mu.find_capturing(
-        &query,
-        &FindOpts::default(),
-    ).await?;
-    debug_log!("IPC Search: loaded {} envelopes", envelopes.len());
-    self.envelopes = envelopes;
-    self.selected = 0;
     self.current_folder = query.clone();
-    self.set_status(format!("Search: {}", query));
-    Ok(IpcResponse::MuFrames { frames: raw_sexps })
+    match self.load_folder().await {
+        Ok(()) => debug_log!("IPC Message: loaded {} envelopes", self.envelopes.len()),
+        Err(e) => debug_log!("IPC Message: load error: {}", e),
+    }
+    self.set_status(format!("Opened message {}", id));
+    Ok(self.capture_envelopes(&query, &FindOpts::default()).await)
 }
 ```
 
-For `HuttUrl::Thread` — the thread loading is more complex (it calls `open_thread` which does its own find). Change to capture:
+**Step 3: Update `HuttUrl::Thread` arm**
+
+Keep existing TUI logic (find → open_thread). Capture the thread with `include_related`:
 
 ```rust
 HuttUrl::Thread { id, account } => {
@@ -568,32 +564,29 @@ HuttUrl::Thread { id, account } => {
     debug_log!("IPC Thread: query={}", query);
     self.mode = InputMode::Normal;
     self.thread_messages.clear();
-    let (envelopes, _) = self.mu.find_capturing(
-        &query,
-        &FindOpts::default(),
-    ).await?;
+    let result = self
+        .mu
+        .find(&query, &crate::mu_client::FindOpts::default())
+        .await;
+    debug_log!("IPC Thread: find result: {:?}", result.as_ref().map(|v| v.len()));
+    let envelopes = result.unwrap_or_default();
     if let Some(envelope) = envelopes.into_iter().next() {
         self.envelopes = vec![envelope];
         self.selected = 0;
-        self.open_thread().await?;
-        // Now capture the thread messages as sexp strings
-        // Re-query with thread context to get all thread envelopes
-        let thread_query = if !self.thread_messages.is_empty() {
-            // thread_messages are already loaded by open_thread
-            // Re-serialize them from the Envelope data isn't ideal,
-            // but open_thread does its own find. For now return Ok
-            // and we'll refine if needed.
-            debug_log!("IPC Thread: opened, {} messages", self.thread_messages.len());
-            self.set_status(format!("Opened thread {}", id));
-            return Ok(IpcResponse::Ok);
-        } else {
-            debug_log!("IPC Thread: message not found");
-            self.set_status(format!("Message not found: {}", id));
-            return Ok(IpcResponse::Error {
-                message: format!("message not found: {}", id),
-            });
+        match self.open_thread().await {
+            Ok(()) => debug_log!("IPC Thread: opened, {} messages", self.thread_messages.len()),
+            Err(e) => debug_log!("IPC Thread: open_thread error: {}", e),
+        }
+        self.set_status(format!("Opened thread {}", id));
+        // Capture thread envelopes for response
+        let opts = FindOpts {
+            include_related: true,
+            descending: false,
+            ..FindOpts::default()
         };
+        Ok(self.capture_envelopes(&query, &opts).await)
     } else {
+        debug_log!("IPC Thread: message not found");
         self.set_status(format!("Message not found: {}", id));
         Ok(IpcResponse::Error {
             message: format!("message not found: {}", id),
@@ -602,48 +595,27 @@ HuttUrl::Thread { id, account } => {
 }
 ```
 
-Actually, let's look at how `open_thread` works first to do this properly.
-
-**Step 2: Check `open_thread` and add a capturing variant**
-
-Look at `open_thread` in `src/tui/mod.rs` — find how it queries for thread messages. It likely calls `self.mu.find(...)` with a msgid or thread-related query, then populates `self.thread_messages`. We need to understand the query it uses so `find_capturing` can be called instead.
-
-If `open_thread` uses `self.mu.find()` internally, we can either:
-- (a) Add a flag on App like `capture_ipc: bool` and a `captured_sexps: Vec<String>` field, and have `load_folder`/`open_thread` use `find_capturing` when the flag is set.
-- (b) Simpler: for the Thread command, call `find_capturing` with `include-related` to get the full thread in one query.
-
-Option (b) is simpler. Use `msgid:<id>` with `include_related: true` to get the whole thread:
+**Step 4: Update `HuttUrl::Search` arm**
 
 ```rust
-HuttUrl::Thread { id, account } => {
+HuttUrl::Search { query, account } => {
     self.switch_to_account_if_needed(&account).await?;
-    let query = format!("msgid:{}", id);
-    debug_log!("IPC Thread: query={}", query);
+    debug_log!("IPC Search: query={}", query);
     self.mode = InputMode::Normal;
     self.thread_messages.clear();
-    // Use include_related to get the full thread
-    let opts = FindOpts {
-        include_related: true,
-        ..FindOpts::default()
-    };
-    let (envelopes, raw_sexps) = self.mu.find_capturing(&query, &opts).await?;
-    if envelopes.is_empty() {
-        self.set_status(format!("Message not found: {}", id));
-        return Ok(IpcResponse::Error {
-            message: format!("message not found: {}", id),
-        });
+    self.current_folder = query.clone();
+    match self.load_folder().await {
+        Ok(()) => debug_log!("IPC Search: loaded {} envelopes", self.envelopes.len()),
+        Err(e) => debug_log!("IPC Search: load error: {}", e),
     }
-    debug_log!("IPC Thread: found {} messages", envelopes.len());
-    // Set up the first envelope for thread view
-    self.envelopes = vec![envelopes[0].clone()];
-    self.selected = 0;
-    self.open_thread().await?;
-    self.set_status(format!("Opened thread {}", id));
-    Ok(IpcResponse::MuFrames { frames: raw_sexps })
+    self.set_status(format!("Search: {}", query));
+    // Capture uses build_query() since load_folder may expand the query
+    let expanded = self.build_query();
+    Ok(self.capture_envelopes(&expanded, &FindOpts::default()).await)
 }
 ```
 
-For `IpcCommand::Navigate`:
+**Step 5: Update `IpcCommand::Navigate` arm**
 
 ```rust
 IpcCommand::Navigate { folder, account } => {
@@ -651,39 +623,31 @@ IpcCommand::Navigate { folder, account } => {
     debug_log!("IPC Navigate: folder={}", folder);
     self.mode = InputMode::Normal;
     self.thread_messages.clear();
-    // We need to capture during navigate. Call find_capturing with
-    // the folder query (same as load_folder would build).
-    let query = self.build_folder_query(&folder);
-    let (envelopes, raw_sexps) = self.mu.find_capturing(
-        &query,
-        &FindOpts::default(),
-    ).await?;
-    debug_log!("IPC Navigate: loaded {} envelopes", envelopes.len());
-    self.current_folder = folder;
-    self.envelopes = envelopes;
-    self.selected = 0;
-    Ok(IpcResponse::MuFrames { frames: raw_sexps })
+    match self.navigate_folder(&folder).await {
+        Ok(()) => debug_log!("IPC Navigate: loaded {} envelopes", self.envelopes.len()),
+        Err(e) => debug_log!("IPC Navigate: error: {}", e),
+    }
+    // Capture using the expanded query (after navigate set current_folder)
+    let expanded = self.build_query();
+    Ok(self.capture_envelopes(&expanded, &FindOpts::default()).await)
 }
 ```
 
-Note: `navigate_folder` and `load_folder` may have additional logic (split exclusion, conversations grouping, etc.). For the IPC response we return the raw mu results — the TUI-side filtering still happens for display, but the IPC consumer gets the full results. If `build_folder_query` doesn't exist as a separate method, extract the query-building logic from `load_folder` or `navigate_folder` into a helper.
+**Step 6: `Compose` and `Quit` arms stay as `Ok(IpcResponse::Ok)`**
 
-**Important:** Check how `load_folder` and `navigate_folder` build their query. The navigate handler needs to replicate the query construction. Look at `navigate_folder` to see if it just sets `self.current_folder` and calls `load_folder`, and what `load_folder` does with the folder string. The IPC handler should call `find_capturing` with the same query that `load_folder` would use.
+No changes needed — they don't return envelope data.
 
-**Step 3: Verify `Compose` and `Quit` still return `IpcResponse::Ok`**
+**Step 7: Run `cargo check`**
 
-These arms shouldn't need changes — they already return `Ok(IpcResponse::Ok)` from Task 3.
-
-**Step 4: Run `cargo check`**
-
-**Step 5: Commit**
+**Step 8: Commit**
 
 ```bash
 git add src/tui/mod.rs
 git commit -m "Return MuFrames from IPC envelope commands
 
-Message, Thread, Search use find_capturing to return raw sexp strings.
-Navigate captures during folder load. Compose and Quit return Ok."
+Each handler keeps its existing TUI state management (load_folder,
+navigate_folder, open_thread) then does a second find_capturing
+for the IPC response."
 ```
 
 ---
@@ -691,7 +655,7 @@ Navigate captures during folder load. Compose and Quit return Ok."
 ### Task 7: Add `sexp_to_json` conversion
 
 **Files:**
-- Modify: `src/mu_sexp.rs` (add `sexp_to_json` and `sexp_value_to_json` functions)
+- Modify: `src/mu_sexp.rs` (add `sexp_to_json` and helpers)
 
 **Step 1: Add the conversion functions**
 
@@ -701,20 +665,19 @@ Add at the end of `src/mu_sexp.rs` (before `#[cfg(test)]`):
 /// Convert a mu sexp plist string to a JSON value.
 ///
 /// Special handling:
-/// - `:date` key: Emacs time triple (high low micro) → ISO 8601 string
-/// - `:keyword value` pairs → `{"keyword": value}`
-/// - `t` / `nil` symbols → `true` / `false`
-/// - Symbol lists like `(seen flagged)` → `["seen", "flagged"]`
-/// - Nested plists → nested JSON objects
-/// - Lists of plists → JSON arrays of objects
+/// - `:date` / `:changed` keys: Emacs time triple → ISO 8601 string
+/// - Plist keyword-value pairs → JSON object
+/// - Symbol lists (flags) → JSON string arrays
+/// - `t` / `nil` → `true` / `false`
+/// - Nested plists and lists of plists → nested objects/arrays
 pub fn sexp_to_json(sexp: &str) -> Result<serde_json::Value> {
     let value = parse_sexp(sexp)?;
-    Ok(sexp_value_to_json(&value, None))
+    Ok(value_to_json(&value, None))
 }
 
 /// Recursive conversion of a lexpr Value to serde_json::Value.
-/// `parent_key` is the plist key that produced this value (for special-case handling).
-fn sexp_value_to_json(value: &Value, parent_key: Option<&str>) -> serde_json::Value {
+/// `parent_key` is used for context-sensitive conversion (e.g. :date).
+fn value_to_json(value: &Value, parent_key: Option<&str>) -> serde_json::Value {
     // Nil
     if value.is_nil() {
         return serde_json::Value::Null;
@@ -725,12 +688,12 @@ fn sexp_value_to_json(value: &Value, parent_key: Option<&str>) -> serde_json::Va
         return serde_json::Value::String(s.to_string());
     }
 
-    // Number (integer)
+    // Integer
     if let Some(n) = value.as_i64() {
         return serde_json::json!(n);
     }
 
-    // Number (float)
+    // Float
     if let Some(n) = value.as_f64() {
         return serde_json::json!(n);
     }
@@ -744,67 +707,77 @@ fn sexp_value_to_json(value: &Value, parent_key: Option<&str>) -> serde_json::Va
         };
     }
 
-    // Keyword (bare, not in a plist position)
+    // Bare keyword
     if let Some(kw) = value.as_keyword() {
         return serde_json::Value::String(format!(":{}", kw));
     }
 
-    // Cons cell (list) — could be a plist, a list of plists, or a plain list
+    // Cons cell (list)
     if let Some(cons) = value.as_cons() {
         let items: Vec<&Value> = cons.iter().map(|pair| pair.car()).collect();
+        if items.is_empty() {
+            return serde_json::Value::Array(vec![]);
+        }
 
-        // Check if this is a plist (first element is a keyword)
-        if !items.is_empty() && items[0].is_keyword() {
+        // Plist: first element is a keyword
+        if items[0].is_keyword() {
             return plist_to_json(&items);
         }
 
-        // Check if this is a date triple: (high low micro) under :date key
-        if parent_key == Some("date") || parent_key == Some("changed") {
+        // Emacs time triple under :date or :changed key
+        if matches!(parent_key, Some("date") | Some("changed") | Some("data-tstamp")) {
             if let Some(dt) = parse_emacs_time(value) {
                 return serde_json::Value::String(dt.to_rfc3339());
             }
         }
 
-        // List of plists (e.g., :from, :to address lists)
-        if !items.is_empty() {
-            if let Some(first_cons) = items[0].as_cons() {
-                let first_items: Vec<&Value> = first_cons.iter().map(|p| p.car()).collect();
-                if !first_items.is_empty() && first_items[0].is_keyword() {
-                    // List of plists → array of objects
-                    return serde_json::Value::Array(
-                        items.iter().map(|item| sexp_value_to_json(item, None)).collect()
-                    );
-                }
+        // List of plists: first element is itself a cons starting with keyword
+        if items[0].as_cons().is_some() {
+            let first_items: Vec<&Value> = items[0]
+                .as_cons()
+                .unwrap()
+                .iter()
+                .map(|p| p.car())
+                .collect();
+            if !first_items.is_empty() && first_items[0].is_keyword() {
+                return serde_json::Value::Array(
+                    items
+                        .iter()
+                        .map(|item| value_to_json(item, None))
+                        .collect(),
+                );
             }
         }
 
-        // Plain list of symbols/values (e.g., flags: (seen list flagged))
-        return serde_json::Value::Array(
-            items.iter().map(|item| sexp_value_to_json(item, None)).collect()
-        );
+        // Plain list of values (symbols, numbers, etc.)
+        serde_json::Value::Array(
+            items
+                .iter()
+                .map(|item| value_to_json(item, None))
+                .collect(),
+        )
+    } else {
+        // Fallback
+        serde_json::Value::String(value.to_string())
     }
-
-    // Fallback: render as string
-    serde_json::Value::String(value.to_string())
 }
 
-/// Convert a plist (flat keyword-value pairs) to a JSON object.
+/// Convert a plist (keyword-value pairs) to a JSON object.
 fn plist_to_json(items: &[&Value]) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     let mut i = 0;
     while i < items.len() {
         if let Some(key) = items[i].as_keyword() {
             if i + 1 < items.len() {
-                let val = sexp_value_to_json(items[i + 1], Some(key));
+                let val = value_to_json(items[i + 1], Some(key));
                 map.insert(key.to_string(), val);
                 i += 2;
             } else {
-                // Keyword with no value — treat as true
                 map.insert(key.to_string(), serde_json::Value::Bool(true));
                 i += 1;
             }
         } else {
-            i += 1; // skip unexpected non-keyword
+            i += 1;
         }
     }
     serde_json::Value::Object(map)
@@ -833,7 +806,7 @@ fn test_sexp_to_json_envelope() {
     assert_eq!(json["message-id"], "abc@example.com");
     // Date should be ISO 8601
     let date_str = json["date"].as_str().unwrap();
-    assert!(date_str.contains("2026-"), "date should be ISO 8601, got: {}", date_str);
+    assert!(date_str.contains("2026-"), "expected ISO 8601 date, got: {}", date_str);
 }
 
 #[test]
@@ -851,12 +824,20 @@ fn test_sexp_to_json_nested_meta() {
     assert_eq!(json["meta"]["level"], 0);
     assert_eq!(json["meta"]["root"], true);
 }
+
+#[test]
+fn test_sexp_to_json_empty_list() {
+    let sexp = "(:docid 1 :flags ())";
+    let json = sexp_to_json(sexp).unwrap();
+    // nil in lexpr for empty list
+    assert!(json["flags"].is_null() || json["flags"].is_array());
+}
 ```
 
 **Step 3: Run tests**
 
 Run: `cargo test test_sexp_to_json`
-Expected: all 3 tests PASS
+Expected: all PASS
 
 **Step 4: Commit**
 
@@ -864,7 +845,7 @@ Expected: all 3 tests PASS
 git add src/mu_sexp.rs
 git commit -m "Add sexp_to_json: convert mu S-expressions to JSON
 
-Generic recursive conversion with special-case :date → ISO 8601.
+Generic recursive walk with special-case :date/:changed → ISO 8601.
 Handles plists, nested plists, symbol lists, address lists."
 ```
 
@@ -877,7 +858,7 @@ Handles plists, nested plists, symbol lists, address lists."
 
 **Step 1: Define output format enum**
 
-Add near the top of `src/main.rs` (after the `use` statements):
+Add near the top of `src/main.rs` (after `const VERSION`):
 
 ```rust
 /// Output format for remote commands.
@@ -889,13 +870,10 @@ enum OutputFormat {
 }
 ```
 
-**Step 2: Extract format flags from `run_remote` args**
-
-Add a helper function:
+**Step 2: Add `extract_output_flags` helper**
 
 ```rust
-/// Extract --sexp, --json, --wrapped from remote command args.
-/// Returns (format, wrapped, remaining_args).
+/// Extract --sexp, --json, --wrapped from args, returning (format, wrapped, remaining).
 fn extract_output_flags(args: &[String]) -> Result<(OutputFormat, bool, Vec<String>)> {
     let mut format = OutputFormat::Silent;
     let mut wrapped = false;
@@ -924,15 +902,11 @@ fn extract_output_flags(args: &[String]) -> Result<(OutputFormat, bool, Vec<Stri
 }
 ```
 
-**Step 3: Add output formatting functions**
+**Step 3: Add `print_ipc_output` function**
 
 ```rust
-/// Format and print IPC response according to output format flags.
-fn print_ipc_output(
-    resp: &links::IpcResponse,
-    format: OutputFormat,
-    wrapped: bool,
-) -> Result<()> {
+/// Format and print IPC response according to output flags.
+fn print_ipc_output(resp: &links::IpcResponse, format: OutputFormat, wrapped: bool) {
     match resp {
         links::IpcResponse::Ok => {
             if wrapped {
@@ -942,20 +916,20 @@ fn print_ipc_output(
                     OutputFormat::Silent => {}
                 }
             }
-            // Unwrapped + Ok = nothing to print
         }
         links::IpcResponse::Error { message } => {
             match format {
                 OutputFormat::Sexp => {
-                    println!("(:error \"{}\")", message.replace('\\', "\\\\").replace('"', "\\\""));
+                    println!(
+                        "(:error \"{}\")",
+                        message.replace('\\', "\\\\").replace('"', "\\\"")
+                    );
                 }
                 OutputFormat::Json => {
                     let obj = serde_json::json!({"error": message});
                     println!("{}", obj);
                 }
-                OutputFormat::Silent => {
-                    // Printed to stderr by the bail! in run_remote
-                }
+                OutputFormat::Silent => {} // handled via bail! in caller
             }
         }
         links::IpcResponse::MuFrames { frames } => {
@@ -963,7 +937,6 @@ fn print_ipc_output(
                 OutputFormat::Silent => {}
                 OutputFormat::Sexp => {
                     if wrapped {
-                        // (:headers (e1 e2 ...) :found N)
                         let joined = frames.join(" ");
                         println!("(:headers ({}) :found {})", joined, frames.len());
                     } else {
@@ -994,13 +967,12 @@ fn print_ipc_output(
             }
         }
     }
-    Ok(())
 }
 ```
 
-**Step 4: Wire it into `run_remote`**
+**Step 4: Wire into `run_remote`**
 
-At the top of `run_remote`, extract format flags before command parsing:
+Replace the beginning and end of `run_remote`:
 
 ```rust
 async fn run_remote(args: &[String]) -> Result<()> {
@@ -1016,35 +988,37 @@ async fn run_remote(args: &[String]) -> Result<()> {
         std::process::exit(1);
     }
 
-    // ... existing command parsing using &args instead of &args[0..] ...
+    let cmd = match args[0].as_str() {
+        // ... (all existing command parsing, but using `args` not the original)
 ```
 
-At the end of `run_remote`, replace the existing response handling:
+At the end, replace the `send_ipc_command` + match:
 
 ```rust
-let resp = links::send_ipc_command(&cmd).await?;
+    let resp = links::send_ipc_command(&cmd).await?;
 
-// Print structured output if requested
-print_ipc_output(&resp, format, wrapped)?;
+    // Print structured output if requested
+    print_ipc_output(&resp, format, wrapped);
 
-match &resp {
-    links::IpcResponse::Error { message } => {
-        if format == OutputFormat::Silent {
-            bail!("hutt: {}", message);
+    match &resp {
+        links::IpcResponse::Error { message } => {
+            if format == OutputFormat::Silent {
+                bail!("hutt: {}", message);
+            }
+            // Already printed structured error above
+            std::process::exit(1);
         }
-        // Error already printed in structured format above
-        std::process::exit(1);
+        _ => Ok(()),
     }
-    _ => Ok(()),
 }
 ```
 
-**Step 5: Update `print_remote_help` to document new flags**
+**Step 5: Update `print_remote_help`**
 
-Add to the help text:
+Add before the COMMANDS section:
 
 ```
-OUTPUT FLAGS (for scripting):
+OUTPUT FLAGS:
     --sexp                  Print results as S-expressions (one per line)
     --json                  Print results as JSON (ndjson, one per line)
     --wrapped               Wrap output in a single object/list
@@ -1058,40 +1032,37 @@ OUTPUT FLAGS (for scripting):
 git add src/main.rs
 git commit -m "Add --sexp/--json/--wrapped output flags to hutt remote
 
-Formats IPC response for scripting: sexp (mu-compatible plists),
-json (ndjson with ISO 8601 dates), wrapped variants. Silent by default."
+Formats IPC response for scripting. Silent by default (backwards
+compatible). sexp emits raw mu plists, json converts via sexp_to_json."
 ```
 
 ---
 
-### Task 9: Update help text and add integration test
+### Task 9: Update top-level help and run full verification
 
 **Files:**
-- Modify: `src/main.rs` (update main help text)
+- Modify: `src/main.rs` (update `print_help`)
 
 **Step 1: Update `print_help`**
 
-Add to the OPTIONS section in `print_help`:
-
+Add to OPTIONS:
 ```
-REMOTE OUTPUT FLAGS:
-    --sexp                  Print results as S-expressions (one per line)
-    --json                  Print results as JSON (ndjson, one per line)
-    --wrapped               Wrap output in a single object/list
+    --sexp                      (remote) Print results as S-expressions
+    --json                      (remote) Print results as JSON (ndjson)
+    --wrapped                   (remote) Wrap output as single object
 ```
 
-Add examples:
-
+Add to EXAMPLES:
 ```
-    hutt r --json search from:alice     Search and output as ndjson
-    hutt r --sexp --wrapped thread ID   Thread envelopes as wrapped sexp
+    hutt r --json search from:alice     Search and output ndjson
+    hutt r --sexp thread abc@host.com   Thread envelopes as sexp
     hutt r --json search q | jq '.path' Extract file paths with jq
 ```
 
-**Step 2: Run full test suite**
+**Step 2: Run full test suite and clippy**
 
 Run: `cargo test && cargo clippy -- -W clippy::all`
-Expected: all pass
+Expected: all pass, no warnings
 
 **Step 3: Commit**
 
@@ -1108,29 +1079,26 @@ git commit -m "Update help text with --sexp/--json examples"
 
 **Files:**
 - Modify: `src/mu_sexp.rs` (add `read_frame_raw`)
-- Modify: `src/mu_client.rs` (add `next_frame_raw`, `send_raw`)
+- Modify: `src/mu_client.rs` (add `next_frame_raw` to `FrameReader`, add `send_raw` to `MuClient`)
 
 **Step 1: Add `read_frame_raw` to `src/mu_sexp.rs`**
 
-Add after `read_frame` (around line 60):
+Add after `encode_frame`:
 
 ```rust
 /// Like `read_frame`, but also returns the raw S-expression string.
 /// Returns (parsed Value, raw sexp string, bytes consumed).
 pub fn read_frame_raw(buf: &[u8]) -> Result<Option<(Value, String, usize)>> {
-    // Find the frame start marker
     let start = match buf.iter().position(|&b| b == 0xfe) {
         Some(pos) => pos,
         None => return Ok(None),
     };
 
-    // Find the length/data separator
     let sep = match buf[start + 1..].iter().position(|&b| b == 0xff) {
         Some(pos) => start + 1 + pos,
         None => return Ok(None),
     };
 
-    // Parse hex length
     let hex_str = std::str::from_utf8(&buf[start + 1..sep])
         .context("invalid utf-8 in frame length")?;
     let length =
@@ -1147,7 +1115,6 @@ pub fn read_frame_raw(buf: &[u8]) -> Result<Option<(Value, String, usize)>> {
     let sexp_str =
         std::str::from_utf8(sexp_bytes).context("invalid utf-8 in sexp data")?;
     let raw = sexp_str.to_string();
-
     let value = parse_sexp(sexp_str)?;
 
     Ok(Some((value, raw, data_end)))
@@ -1173,7 +1140,7 @@ fn test_read_frame_raw() {
 Add after the `next_frame` method:
 
 ```rust
-/// Like `next_frame`, but also returns the raw sexp string.
+/// Like `next_frame`, but also returns the raw sexp string as received from mu.
 async fn next_frame_raw(&mut self) -> Result<(Value, String)> {
     loop {
         if let Some((value, raw, consumed)) = mu_sexp::read_frame_raw(&self.buf)? {
@@ -1197,10 +1164,8 @@ Add after `poll_index_frame`:
 
 ```rust
 /// Send a raw S-expression command and collect all response frames
-/// as raw strings until a terminal frame is reached.
-///
-/// Terminal frames: :found, :pong, :update (move), :remove, :index,
-/// :contacts, :error. The :erase frames are skipped.
+/// as raw strings until a terminal frame.
+/// Skips :erase frames. Used for MuCommand proxying.
 pub async fn send_raw(&mut self, sexp: &str) -> Result<Vec<String>> {
     self.send(sexp).await?;
     let mut frames = Vec::new();
@@ -1215,7 +1180,6 @@ pub async fn send_raw(&mut self, sexp: &str) -> Result<Vec<String>> {
             || mu_sexp::is_update(&value)
             || mu_sexp::plist_get_u32(&value, "remove").is_some()
             || mu_sexp::plist_get(&value, "index").is_some()
-            || mu_sexp::plist_get(&value, "contacts").is_some()
             || (mu_sexp::plist_get(&value, "info").is_some()
                 && mu_sexp::plist_get(&value, "status")
                     .and_then(|v| v.as_symbol()) == Some("complete"));
@@ -1236,19 +1200,19 @@ pub async fn send_raw(&mut self, sexp: &str) -> Result<Vec<String>> {
 git add src/mu_sexp.rs src/mu_client.rs
 git commit -m "Add raw frame capture: read_frame_raw, next_frame_raw, send_raw
 
-send_raw forwards a raw S-expression and collects all response frames
-as original strings for faithful proxying."
+For faithful mu server proxying. send_raw preserves original sexp
+strings instead of re-serializing from parsed Values."
 ```
 
 ---
 
-### Task 11: Add `MuCommand` variant and handle it in event loop
+### Task 11: Add `MuCommand` variant and handle it
 
 **Files:**
-- Modify: `src/links.rs` (add `MuCommand` variant to `IpcCommand`)
-- Modify: `src/tui/mod.rs` (handle `MuCommand` in `handle_ipc_command_inner`, add `resolve_mu_target`)
+- Modify: `src/links.rs` (add `MuCommand` to `IpcCommand`)
+- Modify: `src/tui/mod.rs` (handle `MuCommand`, add `resolve_mu_target`)
 
-**Step 1: Add `MuCommand` variant to `IpcCommand`**
+**Step 1: Add `MuCommand` variant**
 
 In `src/links.rs`, add to the `IpcCommand` enum:
 
@@ -1279,12 +1243,12 @@ fn test_mu_command_serde() {
 }
 ```
 
-**Step 2: Add `resolve_mu_target` to `App` in `src/tui/mod.rs`**
+**Step 2: Add `resolve_mu_target` to `App`**
 
 ```rust
-/// Resolve an account index from optional account name and/or muhome path.
-/// muhome takes precedence. Returns None if specified but not found.
-/// Returns Some(active_account) if neither specified.
+/// Resolve account index from optional account name / muhome path.
+/// muhome takes precedence. Returns None if specified but not found,
+/// Some(active_account) if neither specified.
 fn resolve_mu_target(&self, account: Option<&str>, muhome: Option<&str>) -> Option<usize> {
     if let Some(mh) = muhome {
         for (idx, _acct) in self.config.accounts.iter().enumerate() {
@@ -1303,7 +1267,7 @@ fn resolve_mu_target(&self, account: Option<&str>, muhome: Option<&str>) -> Opti
 }
 ```
 
-**Step 3: Add `MuCommand` arm to `handle_ipc_command_inner`**
+**Step 3: Add `MuCommand` arm to `handle_ipc_command`**
 
 ```rust
 IpcCommand::MuCommand { sexp, account, muhome } => {
@@ -1321,15 +1285,20 @@ IpcCommand::MuCommand { sexp, account, muhome } => {
                 match self.background_mu.get_mut(&idx) {
                     Some(mu) => mu,
                     None => return Ok(IpcResponse::Error {
-                        message: format!("no mu server running for account '{}'",
-                            self.config.accounts.get(idx).map(|a| a.name.as_str()).unwrap_or("?")),
+                        message: format!(
+                            "no mu server for account '{}'",
+                            self.config.accounts.get(idx)
+                                .map(|a| a.name.as_str()).unwrap_or("?")
+                        ),
                     }),
                 }
             };
             match mu.send_raw(&sexp).await {
                 Ok(frames) => {
-                    // Invalidate cache after mutations
-                    if sexp.starts_with("(move") || sexp.starts_with("(remove") || sexp.starts_with("(index") {
+                    if sexp.starts_with("(move")
+                        || sexp.starts_with("(remove")
+                        || sexp.starts_with("(index")
+                    {
                         self.invalidate_folder_cache();
                     }
                     Ok(IpcResponse::MuFrames { frames })
@@ -1354,8 +1323,8 @@ IpcCommand::MuCommand { sexp, account, muhome } => {
 git add src/links.rs src/tui/mod.rs
 git commit -m "Add MuCommand: forward raw S-expressions to mu server
 
-Resolves target by muhome or account name. Collects raw response
-frames. Invalidates folder cache after mutations."
+Routes by muhome or account name. Collects raw response frames.
+Invalidates folder cache after mutations."
 ```
 
 ---
@@ -1363,11 +1332,11 @@ frames. Invalidates folder cache after mutations."
 ### Task 12: Implement `hutt server` CLI subcommand
 
 **Files:**
-- Modify: `src/main.rs` (add `server` subcommand, `run_server`, `run_server_eval`, `run_server_interactive`, `run_mu_fallback`)
+- Modify: `src/main.rs` (add `server` subcommand, helper functions)
 
 **Step 1: Add `server` to CLI dispatch**
 
-In the main CLI match (around line 180), add before the `"-h"` case:
+In the main CLI match (around line 180), add before `"-h"`:
 
 ```rust
 "server" => {
@@ -1386,17 +1355,16 @@ USAGE:
     hutt server [OPTIONS]
 
 OPTIONS:
-    -h, --help              Show help information
-    --commands              List available commands
-    --eval TEXT             Evaluate mu server expression
+    -h, --help              Show help
+    --commands              List available mu commands
+    --eval TEXT             Evaluate a single mu server expression
     --allow-temp-file       Accepted for compatibility (ignored)
     --muhome <dir>          Select account by muhome path
     --account <name>        Select account by name
     -a <name>               (same as --account)
 
-When hutt is running, commands are proxied through its mu server.
-When hutt is not running (or muhome doesn't match), falls back to
-running mu server directly."
+When hutt is running, proxies through its mu server. Falls back
+to standalone mu server otherwise."
     );
 }
 ```
@@ -1428,7 +1396,7 @@ async fn run_server(args: &[String]) -> Result<()> {
                         .clone(),
                 );
             }
-            "--allow-temp-file" => { /* accepted, ignored */ }
+            "--allow-temp-file" => {}
             "--muhome" => {
                 i += 1;
                 muhome = Some(
@@ -1511,7 +1479,7 @@ async fn run_server_interactive(
     use std::io::Write;
     use tokio::io::AsyncBufReadExt;
 
-    // Emit synthetic pong greeting
+    // Synthetic pong greeting
     let greeting = mu_sexp::encode_frame(
         &format!("(:pong \"hutt\" :props (:version \"{}\"))", VERSION),
     );
@@ -1536,6 +1504,17 @@ async fn run_server_interactive(
             muhome: muhome.clone(),
         };
 
+        let write_error = |msg: &str| -> Result<()> {
+            let err_sexp = format!(
+                "(:error 1 :message \"{}\")",
+                msg.replace('\\', "\\\\").replace('"', "\\\"")
+            );
+            let encoded = mu_sexp::encode_frame(&err_sexp);
+            std::io::stdout().write_all(&encoded)?;
+            std::io::stdout().flush()?;
+            Ok(())
+        };
+
         match links::send_ipc_command(&cmd).await {
             Ok(resp) => match resp {
                 links::IpcResponse::MuFrames { frames } => {
@@ -1546,24 +1525,12 @@ async fn run_server_interactive(
                     std::io::stdout().flush()?;
                 }
                 links::IpcResponse::Error { message } => {
-                    let err_sexp = format!(
-                        "(:error 1 :message \"{}\")",
-                        message.replace('\\', "\\\\").replace('"', "\\\"")
-                    );
-                    let encoded = mu_sexp::encode_frame(&err_sexp);
-                    std::io::stdout().write_all(&encoded)?;
-                    std::io::stdout().flush()?;
+                    write_error(&message)?;
                 }
                 links::IpcResponse::Ok => {}
             },
             Err(e) => {
-                let err_sexp = format!(
-                    "(:error 1 :message \"{}\")",
-                    e.to_string().replace('\\', "\\\\").replace('"', "\\\"")
-                );
-                let encoded = mu_sexp::encode_frame(&err_sexp);
-                std::io::stdout().write_all(&encoded)?;
-                std::io::stdout().flush()?;
+                write_error(&e.to_string())?;
             }
         }
     }
@@ -1576,14 +1543,11 @@ async fn run_server_interactive(
 
 ```rust
 async fn run_mu_fallback(args: &[String]) -> Result<()> {
-    // Build mu server args, filtering out --account (not a mu flag)
     let mut mu_args = vec!["server".to_string()];
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--account" | "-a" => {
-                i += 1; // skip --account and its value
-            }
+            "--account" | "-a" => { i += 1; } // skip (not a mu flag)
             other => mu_args.push(other.to_string()),
         }
         i += 1;
@@ -1613,9 +1577,8 @@ async fn run_mu_fallback(args: &[String]) -> Result<()> {
 git add src/main.rs
 git commit -m "Add 'hutt server' CLI: drop-in mu server replacement
 
-Interactive and --eval modes proxy through running hutt instance.
-Falls back to standalone mu server when hutt unavailable. Speaks
-mu wire protocol on stdin/stdout."
+Interactive and --eval modes. Proxies through running hutt via IPC.
+Falls back to standalone mu when hutt unavailable."
 ```
 
 ---
@@ -1624,32 +1587,32 @@ mu wire protocol on stdin/stdout."
 
 **Files:**
 - Modify: `src/main.rs` (update `print_help`)
-- Modify: `CLAUDE.md` (document new features)
+- Modify: `CLAUDE.md`
 
-**Step 1: Update `print_help` with server subcommand**
+**Step 1: Update `print_help`**
 
 Add to USAGE:
 ```
     hutt server [OPTIONS]            Drop-in mu server replacement (proxies through hutt)
 ```
 
-Add SERVER section to the help body, and update EXAMPLES:
+Add SERVER section and update EXAMPLES:
 ```
     hutt server                     Interactive mu server proxy
     hutt server --eval '(ping)'    Single command evaluation
-    hutt server --muhome ~/.mu/work Select account by muhome path
+    hutt server --muhome ~/.mu/work Select account by muhome
 ```
 
 **Step 2: Update CLAUDE.md**
 
-Add a bullet under "Key subsystems":
+Under "Key subsystems", add:
 ```
 - **hutt server** (`main.rs:run_server`): Drop-in `mu server` replacement.
   Proxies raw S-expressions through hutt's running mu server via bidirectional
   IPC. Falls back to standalone `mu server` when hutt isn't running.
 ```
 
-Update the IPC description to mention bidirectional:
+Update the URI/IPC description to mention bidirectional:
 ```
 - **URI schemes** (`links.rs`): ... Bidirectional IPC: commands return
   `IpcResponse` (Ok/Error/MuFrames). `--sexp`/`--json`/`--wrapped` flags
