@@ -183,12 +183,16 @@ impl<'a> Widget for ConversationList<'a> {
             let w = area.width as usize;
 
             // Multi-select / unread / flag indicator (2 chars)
+            // Conversations use » instead of > to signal grouped messages
+            let is_thread = convo.messages.len() > 1;
             let indicator = if is_multi {
                 "x "
             } else if is_flagged {
                 "* "
             } else if is_unread {
-                "> "
+                if is_thread { "\u{00bb} " } else { "> " }
+            } else if is_thread {
+                "\u{00bb} "
             } else {
                 "  "
             };

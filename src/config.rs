@@ -19,6 +19,15 @@ pub struct Config {
     /// Start in conversations (grouped threads) mode.
     #[serde(default)]
     pub conversations: bool,
+    /// Spawn background mu servers for non-active accounts to prefetch
+    /// their folders. Speeds up account switching but uses more memory.
+    /// Default: true
+    #[serde(default = "default_true")]
+    pub background_servers: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -30,6 +39,7 @@ impl Default for Config {
             snippets: Vec::new(),
             bindings: BindingsSection::default(),
             conversations: false,
+            background_servers: true,
         }
     }
 }
