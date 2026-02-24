@@ -1341,19 +1341,9 @@ impl App {
         }
     }
 
-    async fn edit_selected_folder(&mut self) {
-        let filtered = self.filtered_folders();
-        let folder = match filtered.get(self.folder_selected) {
-            Some(f) => f.clone(),
-            None => return,
-        };
-
-        if folder.starts_with("+ ") {
-            return;
-        }
-
+    /// Open the query editor for a @smart or #split folder.
+    async fn edit_folder(&mut self, folder: &str) {
         if let Some(name) = folder.strip_prefix('@') {
-            // Smart folder — edit query
             if let Some(sf) = self.smart_folders.iter().find(|sf| sf.name == name) {
                 self.smart_create_query = sf.query.clone();
                 self.smart_create_name = sf.name.clone();
@@ -1361,12 +1351,11 @@ impl App {
                 self.smart_create_preview.clear();
                 self.smart_create_count = None;
                 self.creating_split = false;
-                self.editing_folder = Some(folder.clone());
+                self.editing_folder = Some(folder.to_string());
                 self.update_smart_create_preview().await;
                 self.mode = InputMode::SmartFolderCreate;
             }
         } else if let Some(name) = folder.strip_prefix('#') {
-            // Split — edit query
             if let Some(s) = self.splits.iter().find(|s| s.name == name) {
                 self.smart_create_query = s.query.clone();
                 self.smart_create_name = s.name.clone();
@@ -1374,13 +1363,26 @@ impl App {
                 self.smart_create_preview.clear();
                 self.smart_create_count = None;
                 self.creating_split = true;
-                self.editing_folder = Some(folder.clone());
+                self.editing_folder = Some(folder.to_string());
                 self.update_smart_create_preview().await;
                 self.mode = InputMode::SmartFolderCreate;
             }
         } else {
             self.set_status("Only smart folders (@) and splits (#) can be edited".to_string());
         }
+    }
+
+    /// Edit the selected folder in the folder picker.
+    async fn edit_selected_folder(&mut self) {
+        let filtered = self.filtered_folders();
+        let folder = match filtered.get(self.folder_selected) {
+            Some(f) => f.clone(),
+            None => return,
+        };
+        if folder.starts_with("+ ") {
+            return;
+        }
+        self.edit_folder(&folder).await;
     }
 
     async fn delete_selected_folder(&mut self) {
@@ -2167,6 +2169,11 @@ impl App {
                 self.mode = InputMode::SmartFolderCreate;
             }
 
+            Action::EditFolder => {
+                let folder = self.current_folder.clone();
+                self.edit_folder(&folder).await;
+            }
+
             // Text input
             Action::InputChar(c) => match self.mode {
                 InputMode::Search => {} // handled by textarea in event loop
@@ -2267,7 +2274,10 @@ impl App {
                 }
                 InputMode::SmartFolderCreate => {
                     if !self.smart_create_query.trim().is_empty() {
-                        self.smart_create_name = self.smart_create_query.clone();
+                        // When editing, keep the existing name; when creating, default to query
+                        if self.editing_folder.is_none() {
+                            self.smart_create_name = self.smart_create_query.clone();
+                        }
                         self.smart_create_phase = 1;
                         self.mode = InputMode::SmartFolderName;
                     }
