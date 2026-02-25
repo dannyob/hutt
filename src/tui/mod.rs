@@ -1189,32 +1189,51 @@ impl App {
         }
         let count = targets.len();
         let gmail_archive = self.is_gmail_archive(dest_maildir);
+        let mut succeeded: HashSet<u32> = HashSet::new();
+        let mut errors = 0u32;
         for (docid, maildir, flags) in &targets {
             if gmail_archive {
                 // Gmail: just remove from Inbox; message stays in All Mail.
                 // Undo not supported for Gmail archive (message removed from
                 // mu database; would need to re-sync to recover).
-                self.mu.remove_msg(*docid).await?;
+                match self.mu.remove_msg(*docid).await {
+                    Ok(()) => { succeeded.insert(*docid); }
+                    Err(e) => {
+                        debug_log!("triage_move: remove docid {} failed: {}", docid, e);
+                        errors += 1;
+                    }
+                }
             } else {
-                let new_docid = self.mu.move_msg(*docid, Some(dest_maildir), None).await?;
-                self.undo_stack.push(UndoEntry {
-                    action: UndoAction::MoveMessage {
-                        docid: new_docid,
-                        original_maildir: maildir.clone(),
-                        original_flags: flags.clone(),
-                    },
-                    description: desc.to_string(),
-                });
+                match self.mu.move_msg(*docid, Some(dest_maildir), None).await {
+                    Ok(new_docid) => {
+                        succeeded.insert(*docid);
+                        self.undo_stack.push(UndoEntry {
+                            action: UndoAction::MoveMessage {
+                                docid: new_docid,
+                                original_maildir: maildir.clone(),
+                                original_flags: flags.clone(),
+                            },
+                            description: desc.to_string(),
+                        });
+                    }
+                    Err(e) => {
+                        debug_log!("triage_move: move docid {} failed: {}", docid, e);
+                        errors += 1;
+                    }
+                }
             }
         }
-        let removed: HashSet<u32> = targets.iter().map(|(d, _, _)| *d).collect();
-        self.envelopes.retain(|e| !removed.contains(&e.docid));
+        self.envelopes.retain(|e| !succeeded.contains(&e.docid));
         self.invalidate_folder_cache();
         self.rebuild_conversations();
         self.selected_set.clear();
         self.clamp_selection();
         self.preview_scroll = 0;
-        self.set_status(format!("{} {} message(s)", desc, count));
+        if errors > 0 {
+            self.set_status(format!("{} {} message(s) ({} failed)", desc, succeeded.len(), errors));
+        } else {
+            self.set_status(format!("{} {} message(s)", desc, count));
+        }
         Ok(())
     }
 
@@ -1223,30 +1242,43 @@ impl App {
         if targets.is_empty() {
             return Ok(());
         }
-        let count = targets.len();
+        let mut succeeded = 0u32;
+        let mut errors = 0u32;
         for (docid, maildir, flags) in &targets {
             let new_flags = if flags.contains(flag_char) {
                 flags.replace(flag_char, "")
             } else {
                 format!("{}{}", flags, flag_char)
             };
-            let new_docid = self.mu.move_msg(*docid, None, Some(&new_flags)).await?;
-            self.undo_stack.push(UndoEntry {
-                action: UndoAction::MoveMessage {
-                    docid: new_docid,
-                    original_maildir: maildir.clone(),
-                    original_flags: flags.clone(),
-                },
-                description: format!("toggle {}", desc),
-            });
-            if let Some(e) = self.envelopes.iter_mut().find(|e| e.docid == *docid) {
-                e.docid = new_docid;
-                e.flags = flags_from_string(&new_flags);
+            match self.mu.move_msg(*docid, None, Some(&new_flags)).await {
+                Ok(new_docid) => {
+                    succeeded += 1;
+                    self.undo_stack.push(UndoEntry {
+                        action: UndoAction::MoveMessage {
+                            docid: new_docid,
+                            original_maildir: maildir.clone(),
+                            original_flags: flags.clone(),
+                        },
+                        description: format!("toggle {}", desc),
+                    });
+                    if let Some(e) = self.envelopes.iter_mut().find(|e| e.docid == *docid) {
+                        e.docid = new_docid;
+                        e.flags = flags_from_string(&new_flags);
+                    }
+                }
+                Err(e) => {
+                    debug_log!("triage_toggle_flag: move docid {} failed: {}", docid, e);
+                    errors += 1;
+                }
             }
         }
         self.invalidate_folder_cache();
         self.selected_set.clear();
-        self.set_status(format!("Toggled {} on {} message(s)", desc, count));
+        if errors > 0 {
+            self.set_status(format!("Toggled {} on {} message(s) ({} failed)", desc, succeeded, errors));
+        } else {
+            self.set_status(format!("Toggled {} on {} message(s)", desc, succeeded));
+        }
         Ok(())
     }
 
@@ -2371,11 +2403,17 @@ impl App {
             Action::ThreadNext => {
                 if self.thread_selected + 1 < self.thread_messages.len() {
                     self.thread_selected += 1;
+                    if let Some(msg) = self.thread_messages.get_mut(self.thread_selected) {
+                        msg.expanded = true;
+                    }
                 }
             }
             Action::ThreadPrev => {
                 if self.thread_selected > 0 {
                     self.thread_selected -= 1;
+                    if let Some(msg) = self.thread_messages.get_mut(self.thread_selected) {
+                        msg.expanded = true;
+                    }
                 }
             }
             Action::ThreadToggleExpand => {
