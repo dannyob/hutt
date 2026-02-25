@@ -198,6 +198,7 @@ pub struct BottomBar<'a> {
     pub filter_desc: Option<&'a str>,
     pub selection_count: usize,
     pub conversations_mode: bool,
+    pub sort_label: Option<&'a str>,
 }
 
 impl<'a> BottomBar<'a> {
@@ -223,6 +224,7 @@ impl<'a> BottomBar<'a> {
             InputMode::MaildirCreate => "Type path | Enter:create Esc:cancel",
             InputMode::MoveToFolder => "Enter:move Esc:cancel | type to filter",
             InputMode::AccountPicker => "j/k:nav Enter:select Esc:cancel",
+            InputMode::SortPicker => "(d)ate (f)rom (s)ubject (t)o | Esc:cancel",
             InputMode::AttachmentPopup => "j/k:nav Enter:select Esc:cancel",
         }
     }
@@ -245,6 +247,10 @@ impl<'a> Widget for BottomBar<'a> {
 
         if let Some(filter) = self.filter_desc {
             text.push_str(&format!(" [{}] ", filter));
+        }
+
+        if let Some(sort) = self.sort_label {
+            text.push_str(&format!(" [{}] ", sort));
         }
 
         if let Some(ref pending) = self.pending_key {

@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use crate::compose;
 use crate::config::Config;
 use crate::envelope::{flags_from_string, group_into_conversations, Conversation, Envelope};
-use crate::keymap::{Action, InputMode, KeyMapper};
+use crate::keymap::{Action, InputMode, KeyMapper, SortField};
 use crate::links::{self, HuttUrl, IpcCommand, IpcListener, IpcResponse};
 use crate::mime_render::{self, RenderCache};
 use crate::mu_client::{FindOpts, MuClient};
@@ -300,6 +300,8 @@ pub struct App {
 
     // Conversations (grouped threads) mode
     pub conversations_mode: bool,
+    pub sort_field: SortField,
+    pub sort_descending: bool,
     pub conversations: Vec<Conversation>,
 
     // Tab bar
@@ -734,6 +736,8 @@ impl App {
             smart_create_count: None,
             maildir_create_input: String::new(),
             conversations_mode: config.conversations,
+            sort_field: SortField::Date,
+            sort_descending: true,
             conversations: Vec::new(),
             palette_filter: String::new(),
             palette_selected: 0,
@@ -807,7 +811,7 @@ impl App {
         self.selected = 0;
         self.scroll_offset = 0;
         self.preview_scroll = 0;
-        self.rebuild_conversations();
+        self.apply_sort();
         if self.known_folders_dirty {
             self.collect_known_folders();
             self.known_folders_dirty = false;
@@ -1129,6 +1133,57 @@ impl App {
 
     fn rebuild_conversations(&mut self) {
         self.conversations = group_into_conversations(&self.envelopes);
+    }
+
+    /// Sort the envelope list by the current sort field and direction.
+    /// Preserves the selected message by message-id.
+    fn apply_sort(&mut self) {
+        let selected_msgid = self.preview_envelope()
+            .map(|e| e.message_id.clone());
+
+        let desc = self.sort_descending;
+        self.envelopes.sort_by(|a, b| {
+            let cmp = match self.sort_field {
+                SortField::Date => a.date.cmp(&b.date),
+                SortField::From => {
+                    let af = a.sender_display().to_lowercase();
+                    let bf = b.sender_display().to_lowercase();
+                    af.cmp(&bf)
+                }
+                SortField::Subject => {
+                    let as_ = a.subject.to_lowercase();
+                    let bs = b.subject.to_lowercase();
+                    as_.cmp(&bs)
+                }
+                SortField::To => {
+                    let at = a.to.first().map(|addr| addr.email.to_lowercase()).unwrap_or_default();
+                    let bt = b.to.first().map(|addr| addr.email.to_lowercase()).unwrap_or_default();
+                    at.cmp(&bt)
+                }
+            };
+            if desc { cmp.reverse() } else { cmp }
+        });
+
+        self.rebuild_conversations();
+
+        // Restore selection
+        if let Some(ref mid) = selected_msgid {
+            let new_idx = if self.conversations_mode {
+                self.conversations.iter().position(|c| {
+                    c.messages.iter().any(|e| e.message_id == *mid)
+                })
+            } else {
+                self.envelopes.iter().position(|e| e.message_id == *mid)
+            };
+            self.selected = new_idx.unwrap_or(0);
+            self.scroll_offset = self.selected.saturating_sub(5);
+        }
+    }
+
+    /// Human-readable label for the current sort (shown in status bar).
+    fn sort_label(&self) -> String {
+        let arrow = if self.sort_descending { "\u{25bc}" } else { "\u{25b2}" };
+        format!("{}{}", self.sort_field.label(), arrow)
     }
 
     /// Number of visible rows: conversations or envelopes depending on mode.
@@ -2584,6 +2639,17 @@ impl App {
                 }
             }
 
+            // Sort
+            Action::SortPicker => {
+                self.mode = InputMode::SortPicker;
+                self.set_status("Sort by: (d)ate  (f)rom  (s)ubject  (t)o".to_string());
+            }
+            Action::ReverseSort => {
+                self.sort_descending = !self.sort_descending;
+                self.apply_sort();
+                self.set_status(format!("Sort: {}", self.sort_label()));
+            }
+
             // Help
             Action::ShowHelp => {
                 self.help_scroll = 0;
@@ -3273,6 +3339,11 @@ pub async fn run(mut app: App) -> Result<()> {
                 frame.render_widget(&app.search_textarea, ta_area);
             } else {
                 let filter_desc = app.filter_description();
+                let sort_label_str = if app.sort_field != SortField::Date || !app.sort_descending {
+                    Some(app.sort_label())
+                } else {
+                    None
+                };
                 let bottom = BottomBar {
                     mode: &app.mode,
                     pending_key: app.keymap.pending_display(),
@@ -3280,6 +3351,7 @@ pub async fn run(mut app: App) -> Result<()> {
                     filter_desc: filter_desc.as_deref(),
                     selection_count: app.selected_set.len(),
                     conversations_mode: app.conversations_mode,
+                    sort_label: sort_label_str.as_deref(),
                 };
                 frame.render_widget(bottom, outer[2]);
             }
@@ -3734,7 +3806,7 @@ pub async fn run(mut app: App) -> Result<()> {
                                 let selected_msgid = app.preview_envelope()
                                     .map(|e| e.message_id.clone());
                                 app.envelopes = envelopes;
-                                app.rebuild_conversations();
+                                app.apply_sort();
                                 // Restore selection
                                 if let Some(ref mid) = selected_msgid {
                                     let new_idx = if app.conversations_mode {
@@ -4557,6 +4629,34 @@ pub async fn run(mut app: App) -> Result<()> {
                         app.palette_selected = app.palette_selected.saturating_sub(1);
                         continue;
                     }
+                }
+                InputMode::SortPicker => {
+                    let new_field = match key.code {
+                        crossterm::event::KeyCode::Char('d') => Some(SortField::Date),
+                        crossterm::event::KeyCode::Char('f') => Some(SortField::From),
+                        crossterm::event::KeyCode::Char('s') => Some(SortField::Subject),
+                        crossterm::event::KeyCode::Char('t') => Some(SortField::To),
+                        crossterm::event::KeyCode::Esc => {
+                            app.mode = InputMode::Normal;
+                            app.set_status("".to_string());
+                            continue;
+                        }
+                        _ => None,
+                    };
+                    if let Some(field) = new_field {
+                        if app.sort_field == field {
+                            // Same field: toggle direction
+                            app.sort_descending = !app.sort_descending;
+                        } else {
+                            app.sort_field = field;
+                            // Default direction: date descending, others ascending
+                            app.sort_descending = field == SortField::Date;
+                        }
+                        app.mode = InputMode::Normal;
+                        app.apply_sort();
+                        app.set_status(format!("Sort: {}", app.sort_label()));
+                    }
+                    continue;
                 }
                 InputMode::AccountPicker => {
                     match key.code {

@@ -232,6 +232,18 @@ impl PaletteEntry {
                 shortcut: Some("V".into()),
                 action: Action::ToggleConversations,
             },
+            PaletteEntry {
+                name: "Sort Messages".into(),
+                description: "Change sort field (date, from, subject, to)".into(),
+                shortcut: Some("o".into()),
+                action: Action::SortPicker,
+            },
+            PaletteEntry {
+                name: "Reverse Sort".into(),
+                description: "Toggle ascending/descending sort order".into(),
+                shortcut: Some("O".into()),
+                action: Action::ReverseSort,
+            },
             // Compose
             PaletteEntry {
                 name: "Compose".into(),
