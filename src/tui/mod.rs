@@ -903,6 +903,44 @@ impl App {
         }
     }
 
+    /// Find the filesystem path for a message by Message-ID.
+    fn find_message_path(&self, message_id: &str) -> Option<std::path::PathBuf> {
+        for e in &self.envelopes {
+            if e.message_id == message_id {
+                return Some(std::path::PathBuf::from(&e.path));
+            }
+        }
+        for msg in &self.thread_messages {
+            if msg.envelope.message_id == message_id {
+                return Some(std::path::PathBuf::from(&msg.envelope.path));
+            }
+        }
+        None
+    }
+
+    /// Dispatch a URL from a clicked link in the preview or thread view.
+    async fn dispatch_link_url(&mut self, url: &str) {
+        if url.starts_with("http://") || url.starts_with("https://") {
+            let _ = links::open_path(url);
+            self.set_status(format!("Opened: {}", url));
+        } else if url.starts_with("mid:") || url.starts_with("mailto:") {
+            if let Some(parsed) = links::parse_url(url) {
+                match self
+                    .handle_ipc_command(links::IpcCommand::Open(parsed.into()))
+                    .await
+                {
+                    Ok(IpcResponse::Ok) => {}
+                    Ok(IpcResponse::Error { message }) => self.set_status(message),
+                    Ok(_) => {}
+                    Err(e) => self.set_status(format!("Error: {}", e)),
+                }
+            }
+        } else {
+            let _ = links::open_path(url);
+            self.set_status(format!("Opened: {}", url));
+        }
+    }
+
     fn set_status(&mut self, msg: impl Into<String>) {
         self.status_message = Some(msg.into());
         self.status_time = Some(Instant::now());
@@ -1886,6 +1924,31 @@ impl App {
                         // Capture uses build_query() since load_folder may expand the query
                         let expanded = self.build_query();
                         Ok(self.capture_envelopes(&expanded, &FindOpts::default()).await)
+                    }
+                    HuttUrl::MessagePart { message_id, content_id, account } => {
+                        self.switch_to_account_if_needed(&account).await?;
+                        if let Some(path) = self.find_message_path(&message_id) {
+                            match mime_render::extract_attachment(&path, &content_id) {
+                                Ok(att) => {
+                                    let tmp_path = std::env::temp_dir().join(&att.filename);
+                                    if let Err(e) = std::fs::write(&tmp_path, &att.data) {
+                                        return Ok(IpcResponse::Error {
+                                            message: format!("write error: {}", e),
+                                        });
+                                    }
+                                    let _ = links::open_path(tmp_path.to_str().unwrap_or(""));
+                                    self.set_status(format!("Opened: {}", att.filename));
+                                    Ok(IpcResponse::Ok)
+                                }
+                                Err(e) => Ok(IpcResponse::Error {
+                                    message: format!("extract error: {}", e),
+                                }),
+                            }
+                        } else {
+                            Ok(IpcResponse::Error {
+                                message: format!("message not found: {}", message_id),
+                            })
+                        }
                     }
                     HuttUrl::Compose { to, subject, account } => {
                         self.switch_to_account_if_needed(&account).await?;
@@ -3517,6 +3580,26 @@ pub async fn run(mut app: App) -> Result<()> {
                         // Start drag if clicking within 1 col of the border
                         if mouse.column.abs_diff(border_col) <= 1 {
                             app.dragging_border = true;
+                        } else if mouse.column > border_col + 1 {
+                            // Click in preview pane — check for links
+                            let preview_x = border_col + 2; // left border + padding
+                            let header_lines = 5u16; // Subject, From, To, Date, separator
+                            let msg_id = app.preview_envelope().map(|e| e.message_id.clone());
+                            if let Some(msg_id) = msg_id {
+                                if let Some(rendered) = app.preview_cache.get(&msg_id, preview_width) {
+                                    let content_row = (mouse.row.saturating_sub(1)) + app.preview_scroll;
+                                    if content_row >= header_lines {
+                                        let body_line = (content_row - header_lines) as usize;
+                                        let col = mouse.column.saturating_sub(preview_x) as usize;
+                                        let url = rendered.links.iter()
+                                            .find(|l| l.line == body_line && col >= l.col_start && col < l.col_end)
+                                            .map(|l| l.url.clone());
+                                        if let Some(url) = url {
+                                            app.dispatch_link_url(&url).await;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     MouseEventKind::Drag(MouseButton::Left) if app.dragging_border => {
@@ -3533,6 +3616,42 @@ pub async fn run(mut app: App) -> Result<()> {
                     _ => {}
                 }
             }
+
+            // Thread view link clicks
+            if app.mode == InputMode::ThreadView {
+                if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                    let content_row = (mouse.row.saturating_sub(1) + app.thread_scroll) as usize;
+                    let col = mouse.column.saturating_sub(1) as usize; // 1 char left padding
+
+                    // Walk through thread layout to find which message body line was clicked
+                    let mut row_counter = 2usize; // header + blank line
+                    'thread_click: for (idx, msg) in app.thread_messages.iter().enumerate() {
+                        if idx > 0 { row_counter += 1; } // separator
+                        row_counter += 1; // message header line
+
+                        if msg.expanded {
+                            if let Some(ref body) = msg.body {
+                                let body_start = row_counter;
+                                let body_end = body_start + body.lines.len();
+                                if content_row >= body_start && content_row < body_end {
+                                    let body_line = content_row - body_start;
+                                    if let Some(link) = body.links.iter().find(|l| {
+                                        l.line == body_line && col >= l.col_start && col < l.col_end
+                                    }) {
+                                        let url = link.url.clone();
+                                        app.dispatch_link_url(&url).await;
+                                        break 'thread_click;
+                                    }
+                                }
+                                row_counter = body_end + 1; // +1 blank line after body
+                            } else {
+                                row_counter += 2; // "Loading…" + blank line
+                            }
+                        }
+                    }
+                }
+            }
+
             continue;
         }
 

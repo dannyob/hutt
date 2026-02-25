@@ -215,11 +215,10 @@ fn wrap_rich_line(spans: &[RichSpan], max_width: usize) -> Vec<Vec<RichSpan>> {
         };
 
         let mut line_spans: Vec<RichSpan> = Vec::new();
-        for i in pos..pos + chunk_len {
-            let (ch, ref kind) = tagged_chars[i];
+        for (ch, kind) in &tagged_chars[pos..pos + chunk_len] {
             if let Some(last) = line_spans.last_mut() {
                 if same_kind(&last.kind, kind) {
-                    last.text.push(ch);
+                    last.text.push(*ch);
                     continue;
                 }
             }
@@ -335,6 +334,7 @@ fn same_kind(a: &SpanKind, b: &SpanKind) -> bool {
 /// An extracted attachment ready to save or open.
 pub struct ExtractedAttachment {
     pub filename: String,
+    #[allow(dead_code)]
     pub mime_type: String,
     pub data: Vec<u8>,
 }
