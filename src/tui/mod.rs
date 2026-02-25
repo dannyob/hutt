@@ -118,6 +118,13 @@ pub enum TabRegionKind {
     Overflow,     // the "…" button
 }
 
+/// Format a `maildir:` query term with proper quoting.
+/// Paths containing special characters (brackets, spaces) must be quoted
+/// for mu's Xapian query parser to handle them correctly.
+fn maildir_term(folder: &str) -> String {
+    format!("maildir:\"{}\"" , folder)
+}
+
 /// Resolve the tab list from config + runtime folder data.
 ///
 /// `config_tabs` is the user's `tabs` list (or None for default).
@@ -372,9 +379,9 @@ impl App {
             let inbox_folder = self.account()
                 .map(|a| a.folders.inbox.clone())
                 .unwrap_or_else(|| "/Inbox".to_string());
-            format!("maildir:{} AND ({})", inbox_folder, q)
+            format!("{} AND ({})", maildir_term(&inbox_folder), q)
         } else if folder.starts_with('/') {
-            format!("maildir:{}", folder)
+            maildir_term(folder)
         } else {
             folder.to_string()
         }
@@ -444,7 +451,7 @@ impl App {
         }
         // For non-active accounts, build basic maildir queries
         if folder.starts_with('/') {
-            format!("maildir:{}", folder)
+            maildir_term(folder)
         } else {
             folder.to_string()
         }
@@ -779,7 +786,7 @@ impl App {
             ..Default::default()
         };
         for split in &self.splits {
-            let query = format!("maildir:{} AND ({})", inbox_folder, split.query);
+            let query = format!("{} AND ({})", maildir_term(&inbox_folder), split.query);
             match self.mu.find(&query, &opts).await {
                 Ok(envelopes) => {
                     debug_log!("split cache {:?}: {} docids", split.name, envelopes.len());
@@ -797,10 +804,10 @@ impl App {
         // Invalidate cached inbox query since split exclusions changed.
         // Also invalidate cached split folder queries.
         let acct = self.active_account;
-        let inbox_query = format!("maildir:{}", inbox_folder);
+        let inbox_query = maildir_term(&inbox_folder);
         self.folder_cache.remove(&(acct, inbox_query));
         for split in &self.splits {
-            let q = format!("maildir:{} AND ({})", inbox_folder, split.query);
+            let q = format!("{} AND ({})", maildir_term(&inbox_folder), split.query);
             self.folder_cache.remove(&(acct, q));
         }
     }
@@ -812,9 +819,9 @@ impl App {
             let inbox_folder = self.account()
                 .map(|a| a.folders.inbox.clone())
                 .unwrap_or_else(|| "/Inbox".to_string());
-            format!("maildir:{} AND ({})", inbox_folder, q)
+            format!("{} AND ({})", maildir_term(&inbox_folder), q)
         } else if self.current_folder.starts_with('/') {
-            format!("maildir:{}", self.current_folder)
+            maildir_term(&self.current_folder)
         } else {
             // Free-form search query — expand any #split / @smart references
             self.expand_folder_references(&self.current_folder)
@@ -1497,7 +1504,7 @@ impl App {
                 let inbox = self.account()
                     .map(|a| a.folders.inbox.clone())
                     .unwrap_or_else(|| "/Inbox".to_string());
-                format!("maildir:{} AND ({})", inbox, self.smart_create_query)
+                format!("{} AND ({})", maildir_term(&inbox), self.smart_create_query)
             } else {
                 self.smart_create_query.clone()
             };
@@ -2307,7 +2314,7 @@ impl App {
                 {
                     format!("{} ", self.current_folder)
                 } else if self.current_folder.starts_with('/') {
-                    format!("maildir:{} ", self.current_folder)
+                    format!("{} ", maildir_term(&self.current_folder))
                 } else {
                     format!("{} ", self.current_folder)
                 };
@@ -4460,6 +4467,19 @@ fn expand_folder_refs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maildir_term_simple() {
+        assert_eq!(maildir_term("/Inbox"), "maildir:\"/Inbox\"");
+    }
+
+    #[test]
+    fn maildir_term_gmail_brackets() {
+        assert_eq!(
+            maildir_term("/[Gmail]/All Mail"),
+            "maildir:\"/[Gmail]/All Mail\""
+        );
+    }
 
     #[test]
     fn expand_split_reference() {
