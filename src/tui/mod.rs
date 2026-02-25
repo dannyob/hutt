@@ -2892,7 +2892,12 @@ pub async fn run(mut app: App) -> Result<()> {
         };
 
         if app.mode == InputMode::ThreadView {
-            app.ensure_thread_body_loaded(preview_width);
+            // Thread view uses full terminal width (not split preview width)
+            let thread_width = {
+                let size = terminal.size()?;
+                size.width.saturating_sub(4)
+            };
+            app.ensure_thread_body_loaded(thread_width);
         } else {
             app.ensure_preview_loaded(preview_width);
         }
