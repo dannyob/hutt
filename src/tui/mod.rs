@@ -887,12 +887,18 @@ impl App {
         if self.preview_cache.get(msg_id, width).is_some() {
             return;
         }
-        match mime_render::render_message(&envelope.path, width) {
-            Ok(text) => self.preview_cache.insert(msg_id.clone(), width, text),
+        match mime_render::render_message(&envelope.path, msg_id, width) {
+            Ok(rendered) => self.preview_cache.insert(msg_id.clone(), width, rendered),
             Err(e) => self.preview_cache.insert(
                 msg_id.clone(),
                 width,
-                format!("[Error rendering message: {}]", e),
+                mime_render::RenderedMessage {
+                    lines: vec![vec![mime_render::RichSpan {
+                        text: format!("[Error rendering message: {}]", e),
+                        kind: mime_render::SpanKind::Normal,
+                    }]],
+                    links: Vec::new(),
+                },
             ),
         }
     }
@@ -1591,9 +1597,15 @@ impl App {
     fn ensure_thread_body_loaded(&mut self, width: u16) {
         for msg in &mut self.thread_messages {
             if msg.expanded && msg.body.is_none() {
-                match mime_render::render_message(&msg.envelope.path, width) {
-                    Ok(text) => msg.body = Some(text),
-                    Err(e) => msg.body = Some(format!("[Error: {}]", e)),
+                match mime_render::render_message(&msg.envelope.path, &msg.envelope.message_id, width) {
+                    Ok(rendered) => msg.body = Some(rendered),
+                    Err(e) => msg.body = Some(mime_render::RenderedMessage {
+                        lines: vec![vec![mime_render::RichSpan {
+                            text: format!("[Error: {}]", e),
+                            kind: mime_render::SpanKind::Normal,
+                        }]],
+                        links: Vec::new(),
+                    }),
                 }
             }
         }
@@ -1675,20 +1687,23 @@ impl App {
             compose::ComposeKind::NewMessage => Some(compose::ComposeContext::new_message()),
             compose::ComposeKind::Reply => {
                 let envelope = self.selected_envelope()?;
-                let body_text =
-                    mime_render::render_message(&envelope.path, 80).unwrap_or_default();
+                let body_text = mime_render::render_message(&envelope.path, &envelope.message_id, 80)
+                    .map(|rm| rm.to_plain_text())
+                    .unwrap_or_default();
                 Some(compose::ComposeContext::reply(envelope, &body_text, false))
             }
             compose::ComposeKind::ReplyAll => {
                 let envelope = self.selected_envelope()?;
-                let body_text =
-                    mime_render::render_message(&envelope.path, 80).unwrap_or_default();
+                let body_text = mime_render::render_message(&envelope.path, &envelope.message_id, 80)
+                    .map(|rm| rm.to_plain_text())
+                    .unwrap_or_default();
                 Some(compose::ComposeContext::reply(envelope, &body_text, true))
             }
             compose::ComposeKind::Forward => {
                 let envelope = self.selected_envelope()?;
-                let body_text =
-                    mime_render::render_message(&envelope.path, 80).unwrap_or_default();
+                let body_text = mime_render::render_message(&envelope.path, &envelope.message_id, 80)
+                    .map(|rm| rm.to_plain_text())
+                    .unwrap_or_default();
                 Some(compose::ComposeContext::forward(envelope, &body_text))
             }
         }

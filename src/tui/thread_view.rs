@@ -6,10 +6,11 @@ use ratatui::{
 };
 
 use crate::envelope::Envelope;
+use crate::mime_render::{RenderedMessage, SpanKind};
 
 pub struct ThreadMessage {
     pub envelope: Envelope,
-    pub body: Option<String>,
+    pub body: Option<RenderedMessage>,
     pub expanded: bool,
 }
 
@@ -87,26 +88,41 @@ impl<'a> Widget for ThreadView<'a> {
                 msg_index: Some(idx),
             });
 
-            // If expanded, show body (with word wrap)
+            // If expanded, show body
             if msg.expanded {
-                let wrap_width = area.width.saturating_sub(2) as usize; // 1 char padding each side
                 if let Some(ref body) = msg.body {
-                    for line in body.lines() {
-                        let style = if line.starts_with('>') {
-                            header_base.fg(Color::DarkGray)
-                        } else {
-                            header_base.fg(Color::White)
-                        };
-                        for wrapped in wrap_line(line, wrap_width) {
-                            lines.push(RenderedLine {
-                                content: vec![(wrapped, style)],
-                                msg_index: Some(idx),
-                            });
-                        }
+                    for rich_line in &body.lines {
+                        let content: Vec<(String, Style)> = rich_line
+                            .iter()
+                            .map(|span| {
+                                let style = match &span.kind {
+                                    SpanKind::Quote => header_base.fg(Color::DarkGray),
+                                    SpanKind::Link(_) => header_base
+                                        .fg(Color::Cyan)
+                                        .add_modifier(Modifier::UNDERLINED),
+                                    SpanKind::Emphasis => header_base
+                                        .fg(Color::White)
+                                        .add_modifier(Modifier::ITALIC),
+                                    SpanKind::Strong => header_base
+                                        .fg(Color::White)
+                                        .add_modifier(Modifier::BOLD),
+                                    SpanKind::Code => header_base.fg(Color::Green),
+                                    SpanKind::Normal => header_base.fg(Color::White),
+                                };
+                                (span.text.clone(), style)
+                            })
+                            .collect();
+                        lines.push(RenderedLine {
+                            content,
+                            msg_index: Some(idx),
+                        });
                     }
                 } else {
                     lines.push(RenderedLine {
-                        content: vec![("Loading\u{2026}".to_string(), header_base.fg(Color::DarkGray))],
+                        content: vec![(
+                            "Loading\u{2026}".to_string(),
+                            header_base.fg(Color::DarkGray),
+                        )],
                         msg_index: Some(idx),
                     });
                 }
@@ -151,40 +167,6 @@ struct RenderedLine {
     content: Vec<(String, Style)>,
     /// Which message index this line belongs to (None for thread chrome)
     msg_index: Option<usize>,
-}
-
-/// Wrap a line of text to fit within `max_width` characters.
-/// Tries to break at word boundaries; falls back to hard breaks.
-fn wrap_line(s: &str, max_width: usize) -> Vec<String> {
-    if max_width == 0 {
-        return vec![String::new()];
-    }
-    if s.is_empty() {
-        return vec![String::new()];
-    }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max_width {
-        return vec![s.to_string()];
-    }
-    let mut result = Vec::new();
-    let mut pos = 0;
-    while pos < chars.len() {
-        let remaining = chars.len() - pos;
-        if remaining <= max_width {
-            result.push(chars[pos..].iter().collect());
-            break;
-        }
-        // Try to find a word boundary to break at
-        let chunk_end = pos + max_width;
-        let break_at = chars[pos..chunk_end]
-            .iter()
-            .rposition(|&c| c == ' ' || c == '-' || c == '/')
-            .map(|i| pos + i + 1) // break after the space/separator
-            .unwrap_or(chunk_end); // hard break if no good spot
-        result.push(chars[pos..break_at].iter().collect());
-        pos = break_at;
-    }
-    result
 }
 
 /// Truncate a string to fit within `max_width` characters, adding "\u{2026}" if needed.

@@ -3,14 +3,15 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Widget, Wrap},
+    widgets::{Block, Borders, Paragraph, Widget},
 };
 
 use crate::envelope::Envelope;
+use crate::mime_render::{RenderedMessage, SpanKind};
 
 pub struct PreviewPane<'a> {
     pub envelope: Option<&'a Envelope>,
-    pub body: Option<&'a str>,
+    pub body: Option<&'a RenderedMessage>,
     pub scroll: u16,
 }
 
@@ -76,15 +77,14 @@ impl<'a> Widget for PreviewPane<'a> {
             Line::from(""), // separator
         ];
 
-        // Add body lines
+        // Add body lines from RenderedMessage
         if let Some(body) = self.body {
-            for line in body.lines() {
-                let style = if line.starts_with('>') {
-                    Style::default().fg(Color::DarkGray)
-                } else {
-                    Style::default().fg(Color::White)
-                };
-                lines.push(Line::from(Span::styled(line.to_string(), style)));
+            for rich_line in &body.lines {
+                let spans: Vec<Span> = rich_line
+                    .iter()
+                    .map(|s| Span::styled(s.text.clone(), span_style(&s.kind)))
+                    .collect();
+                lines.push(Line::from(spans));
             }
         } else {
             lines.push(Line::from(Span::styled(
@@ -99,10 +99,26 @@ impl<'a> Widget for PreviewPane<'a> {
 
         let paragraph = Paragraph::new(lines)
             .block(block)
-            .wrap(Wrap { trim: false })
             .scroll((self.scroll, 0));
 
         paragraph.render(area, buf);
     }
 }
 
+/// Map SpanKind to ratatui Style.
+pub fn span_style(kind: &SpanKind) -> Style {
+    match kind {
+        SpanKind::Normal => Style::default().fg(Color::White),
+        SpanKind::Quote => Style::default().fg(Color::DarkGray),
+        SpanKind::Link(_) => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::UNDERLINED),
+        SpanKind::Emphasis => Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::ITALIC),
+        SpanKind::Strong => Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+        SpanKind::Code => Style::default().fg(Color::Green),
+    }
+}
