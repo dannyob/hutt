@@ -1176,10 +1176,16 @@ impl App {
             .map(|a| a.folders.archive.as_str())
             .unwrap_or("/Archive");
         // Gmail-style archive: destination is the All Mail folder,
-        // and source messages are in the Inbox
+        // and source messages are in the Inbox (or a split/view of it)
         dest_maildir == archive
             && archive.contains("[Gmail]")
-            && self.is_inbox_folder()
+            && self.is_inbox_derived()
+    }
+
+    /// Check if the current folder contains inbox messages.
+    /// True for the inbox itself and for split inbox folders.
+    fn is_inbox_derived(&self) -> bool {
+        self.is_inbox_folder() || self.split_queries.contains_key(&self.current_folder)
     }
 
     async fn triage_move(&mut self, dest_maildir: &str, desc: &str) -> Result<()> {
