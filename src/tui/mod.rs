@@ -3646,6 +3646,29 @@ pub async fn run(mut app: App) -> Result<()> {
                             debug_log!("reindex: reload error: {}", e);
                         }
                         app.set_status("Reindex complete".to_string());
+
+                        // Reindex background accounts' mu databases.
+                        // These run out-of-process (not via mu server protocol)
+                        // so they don't interfere with the running mu servers.
+                        for (idx, _) in &app.background_mu {
+                            if let Some(muhome) = app.config.effective_muhome(*idx) {
+                                let muhome = muhome.clone();
+                                tokio::spawn(async move {
+                                    let r = tokio::process::Command::new("mu")
+                                        .args(["index", &format!("--muhome={}", muhome)])
+                                        .output()
+                                        .await;
+                                    match r {
+                                        Ok(o) if o.status.success() => {},
+                                        Ok(o) => {
+                                            let err = String::from_utf8_lossy(&o.stderr);
+                                            eprintln!("bg reindex {}: {}", muhome, err);
+                                        }
+                                        Err(e) => eprintln!("bg reindex {}: {}", muhome, e),
+                                    }
+                                });
+                            }
+                        }
                     }
                     Ok(false) => {} // progress update, keep polling
                     Err(e) => {
