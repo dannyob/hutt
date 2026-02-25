@@ -20,6 +20,9 @@ editor = "nvim"
 # Default: false
 # conversations = true
 
+# Directory for saved attachments. Default: ~/Downloads
+# download_dir = "~/Downloads"
+
 # Shell command to sync mail before refreshing the envelope list.
 # Hutt runs this when you press Ctrl-R (SyncMail).
 # Leave unset (or comment out) if you handle sync externally.

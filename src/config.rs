@@ -13,6 +13,8 @@ pub struct Config {
     pub accounts: Vec<AccountConfig>,
     pub editor: String,
     pub sync_command: Option<String>,
+    /// Directory to save attachments to. Default: ~/Downloads.
+    pub download_dir: Option<String>,
     /// Auto-sync interval in minutes (decimals accepted).
     /// When set, hutt will run sync_command periodically while idle.
     pub check_mail_every: Option<f64>,
@@ -46,6 +48,7 @@ impl Default for Config {
             accounts: Vec::new(),
             editor: "nvim".to_string(),
             sync_command: None,
+            download_dir: None,
             check_mail_every: None,
             check_mail_after: None,
 
