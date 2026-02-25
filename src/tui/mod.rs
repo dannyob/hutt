@@ -194,6 +194,8 @@ pub struct AttachmentPopup {
     pub content_id: String,
     pub filename: String,
     pub selected: usize, // 0 = Open, 1 = Save
+    pub mouse_x: u16,    // anchor position for rendering
+    pub mouse_y: u16,
 }
 
 pub struct App {
@@ -931,7 +933,7 @@ impl App {
     }
 
     /// Dispatch a URL from a clicked link in the preview or thread view.
-    async fn dispatch_link_url(&mut self, url: &str) {
+    async fn dispatch_link_url(&mut self, url: &str, mouse_pos: Option<(u16, u16)>) {
         if url.starts_with("http://") || url.starts_with("https://") {
             let _ = links::open_path(url);
             self.set_status(format!("Opened: {}", url));
@@ -948,11 +950,14 @@ impl App {
                             })
                             .map(|att| att.filename)
                             .unwrap_or(filename);
+                        let (mx, my) = mouse_pos.unwrap_or((0, 0));
                         self.attachment_popup = Some(AttachmentPopup {
                             message_id,
                             content_id,
                             filename: real_filename,
                             selected: 0,
+                            mouse_x: mx,
+                            mouse_y: my,
                         });
                         self.mode = InputMode::AttachmentPopup;
                     }
@@ -3293,15 +3298,16 @@ pub async fn run(mut app: App) -> Result<()> {
 
                     let title = format!(" {} ", popup.filename);
                     let options = ["  Open", "  Save"];
-                    let popup_w = title.len().max(20) as u16 + 2;
-                    let popup_h = (options.len() + 2) as u16; // title + options + border
-                    let center_x = size.width.saturating_sub(popup_w) / 2;
-                    let center_y = size.height.saturating_sub(popup_h) / 2;
+                    let popup_w = (title.chars().count().max(10) + 2) as u16;
+                    let popup_h = (options.len() + 1) as u16; // title + options
+                    // Position at mouse, clamped to screen
+                    let popup_x = popup.mouse_x.min(size.width.saturating_sub(popup_w));
+                    let popup_y = popup.mouse_y.min(size.height.saturating_sub(popup_h));
                     let popup_area = ratatui::layout::Rect::new(
-                        center_x,
-                        center_y,
-                        popup_w.min(size.width),
-                        popup_h.min(size.height),
+                        popup_x,
+                        popup_y,
+                        popup_w.min(size.width.saturating_sub(popup_x)),
+                        popup_h.min(size.height.saturating_sub(popup_y)),
                     );
 
                     Clear.render(popup_area, frame.buffer_mut());
@@ -3684,6 +3690,44 @@ pub async fn run(mut app: App) -> Result<()> {
                 continue;
             }
 
+            // Attachment popup: click on Open/Save or dismiss
+            if app.mode == InputMode::AttachmentPopup {
+                if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                    if let Some(ref popup) = app.attachment_popup {
+                        let title = format!(" {} ", popup.filename);
+                        let popup_w = (title.chars().count().max(10) + 2) as u16;
+                        let popup_h = 3u16; // title + 2 options
+                        let size = terminal.size()?;
+                        let popup_x = popup.mouse_x.min(size.width.saturating_sub(popup_w));
+                        let popup_y = popup.mouse_y.min(size.height.saturating_sub(popup_h));
+
+                        // Check if click is on an option row
+                        if mouse.column >= popup_x
+                            && mouse.column < popup_x + popup_w
+                            && mouse.row > popup_y
+                            && mouse.row < popup_y + popup_h
+                        {
+                            let option_idx = (mouse.row - popup_y - 1) as usize;
+                            if let Some(popup) = app.attachment_popup.take() {
+                                app.mode = InputMode::Normal;
+                                if option_idx == 0 {
+                                    app.open_attachment(&popup.message_id, &popup.content_id).await;
+                                } else {
+                                    app.save_attachment(&popup.message_id, &popup.content_id).await;
+                                }
+                            }
+                        } else {
+                            // Click outside popup — dismiss
+                            app.attachment_popup = None;
+                            app.mode = InputMode::Normal;
+                        }
+                    } else {
+                        app.mode = InputMode::Normal;
+                    }
+                }
+                continue;
+            }
+
             if app.mode == InputMode::Normal || app.mode == InputMode::Search {
                 let size = terminal.size()?;
                 let border_col = (size.width as u32 * app.list_pct as u32 / 100) as u16;
@@ -3740,7 +3784,7 @@ pub async fn run(mut app: App) -> Result<()> {
                                             .find(|l| l.line == body_line && col >= l.col_start && col < l.col_end)
                                             .map(|l| l.url.clone());
                                         if let Some(url) = url {
-                                            app.dispatch_link_url(&url).await;
+                                            app.dispatch_link_url(&url, Some((mouse.column, mouse.row))).await;
                                         }
                                     }
                                 }
@@ -3784,7 +3828,7 @@ pub async fn run(mut app: App) -> Result<()> {
                                         l.line == body_line && col >= l.col_start && col < l.col_end
                                     }) {
                                         let url = link.url.clone();
-                                        app.dispatch_link_url(&url).await;
+                                        app.dispatch_link_url(&url, Some((mouse.column, mouse.row))).await;
                                         break 'thread_click;
                                     }
                                 }
