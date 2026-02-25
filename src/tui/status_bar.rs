@@ -223,6 +223,7 @@ impl<'a> BottomBar<'a> {
             InputMode::MaildirCreate => "Type path | Enter:create Esc:cancel",
             InputMode::MoveToFolder => "Enter:move Esc:cancel | type to filter",
             InputMode::AccountPicker => "j/k:nav Enter:select Esc:cancel",
+            InputMode::AttachmentPopup => "j/k:nav Enter:select Esc:cancel",
         }
     }
 }

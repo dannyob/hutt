@@ -188,6 +188,14 @@ pub enum VimSubMode {
     Normal,
 }
 
+/// State for the attachment open/save popup.
+pub struct AttachmentPopup {
+    pub message_id: String,
+    pub content_id: String,
+    pub filename: String,
+    pub selected: usize, // 0 = Open, 1 = Save
+}
+
 pub struct App {
     // Active account (index into config.accounts)
     pub active_account: usize,
@@ -275,6 +283,9 @@ pub struct App {
     pub tab_scroll: usize,
     pub tab_regions: Vec<TabRegion>,
     pub account_picker_selected: usize,
+
+    // Attachment popup state
+    pub attachment_popup: Option<AttachmentPopup>,
 
     // Folder query cache: (account_index, query_string) → envelopes.
     // Invalidated per-account on triage/reindex. Survives account switches
@@ -688,6 +699,7 @@ impl App {
             tab_scroll: 0,
             tab_regions: Vec::new(),
             account_picker_selected: 0,
+            attachment_popup: None,
             folder_cache: HashMap::new(),
             known_folders_dirty: true,
             prefetch_queue: Vec::new(),
@@ -923,7 +935,41 @@ impl App {
         if url.starts_with("http://") || url.starts_with("https://") {
             let _ = links::open_path(url);
             self.set_status(format!("Opened: {}", url));
-        } else if url.starts_with("mid:") || url.starts_with("mailto:") {
+        } else if url.starts_with("mid:") {
+            if let Some(parsed) = links::parse_url(url) {
+                match parsed {
+                    HuttUrl::MessagePart { message_id, content_id, .. } => {
+                        // Show attachment popup instead of directly opening
+                        let filename = content_id.clone(); // will be resolved when acted on
+                        // Try to get the real filename from the message
+                        let real_filename = self.find_message_path(&message_id)
+                            .and_then(|path| {
+                                mime_render::extract_attachment(&path, &content_id).ok()
+                            })
+                            .map(|att| att.filename)
+                            .unwrap_or(filename);
+                        self.attachment_popup = Some(AttachmentPopup {
+                            message_id,
+                            content_id,
+                            filename: real_filename,
+                            selected: 0,
+                        });
+                        self.mode = InputMode::AttachmentPopup;
+                    }
+                    _ => {
+                        match self
+                            .handle_ipc_command(links::IpcCommand::Open(parsed.into()))
+                            .await
+                        {
+                            Ok(IpcResponse::Ok) => {}
+                            Ok(IpcResponse::Error { message }) => self.set_status(message),
+                            Ok(_) => {}
+                            Err(e) => self.set_status(format!("Error: {}", e)),
+                        }
+                    }
+                }
+            }
+        } else if url.starts_with("mailto:") {
             if let Some(parsed) = links::parse_url(url) {
                 match self
                     .handle_ipc_command(links::IpcCommand::Open(parsed.into()))
@@ -938,6 +984,55 @@ impl App {
         } else {
             let _ = links::open_path(url);
             self.set_status(format!("Opened: {}", url));
+        }
+    }
+
+    async fn open_attachment(&mut self, message_id: &str, content_id: &str) {
+        if let Some(path) = self.find_message_path(message_id) {
+            match mime_render::extract_attachment(&path, content_id) {
+                Ok(att) => {
+                    let tmp_path = std::env::temp_dir().join(&att.filename);
+                    if let Err(e) = std::fs::write(&tmp_path, &att.data) {
+                        self.set_status(format!("Write error: {}", e));
+                        return;
+                    }
+                    let _ = links::open_path(tmp_path.to_str().unwrap_or(""));
+                    self.set_status(format!("Opened: {}", att.filename));
+                }
+                Err(e) => self.set_status(format!("Extract error: {}", e)),
+            }
+        } else {
+            self.set_status("Message not found");
+        }
+    }
+
+    async fn save_attachment(&mut self, message_id: &str, content_id: &str) {
+        if let Some(path) = self.find_message_path(message_id) {
+            match mime_render::extract_attachment(&path, content_id) {
+                Ok(att) => {
+                    let download_dir = self.config.download_dir.as_deref()
+                        .unwrap_or("~/Downloads");
+                    let expanded = if let Some(rest) = download_dir.strip_prefix("~/") {
+                        let home = std::env::var("HOME").unwrap_or_default();
+                        format!("{}/{}", home, rest)
+                    } else {
+                        download_dir.to_string()
+                    };
+                    let dir = std::path::Path::new(&expanded);
+                    if let Err(e) = std::fs::create_dir_all(dir) {
+                        self.set_status(format!("Create dir error: {}", e));
+                        return;
+                    }
+                    let save_path = dir.join(&att.filename);
+                    match std::fs::write(&save_path, &att.data) {
+                        Ok(_) => self.set_status(format!("Saved: {}", save_path.display())),
+                        Err(e) => self.set_status(format!("Save error: {}", e)),
+                    }
+                }
+                Err(e) => self.set_status(format!("Extract error: {}", e)),
+            }
+        } else {
+            self.set_status("Message not found");
         }
     }
 
@@ -3189,6 +3284,51 @@ pub async fn run(mut app: App) -> Result<()> {
                     }
                 }
             }
+
+            // Attachment open/save popup
+            if app.mode == InputMode::AttachmentPopup {
+                if let Some(ref popup) = app.attachment_popup {
+                    use ratatui::style::{Color as C, Modifier as M, Style as S};
+                    use ratatui::widgets::{Clear, Widget as _};
+
+                    let title = format!(" {} ", popup.filename);
+                    let options = ["  Open", "  Save"];
+                    let popup_w = title.len().max(20) as u16 + 2;
+                    let popup_h = (options.len() + 2) as u16; // title + options + border
+                    let center_x = size.width.saturating_sub(popup_w) / 2;
+                    let center_y = size.height.saturating_sub(popup_h) / 2;
+                    let popup_area = ratatui::layout::Rect::new(
+                        center_x,
+                        center_y,
+                        popup_w.min(size.width),
+                        popup_h.min(size.height),
+                    );
+
+                    Clear.render(popup_area, frame.buffer_mut());
+
+                    // Title bar
+                    let title_style = S::default().bg(C::DarkGray).fg(C::White).add_modifier(M::BOLD);
+                    let title_padded = format!("{:<width$}", title, width = popup_w as usize);
+                    frame.buffer_mut().set_string(popup_area.x, popup_area.y, &title_padded, title_style);
+
+                    // Options
+                    for (i, label) in options.iter().enumerate() {
+                        let y = popup_area.y + 1 + i as u16;
+                        let is_selected = i == popup.selected;
+                        let style = if is_selected {
+                            S::default().bg(C::Blue).fg(C::White).add_modifier(M::BOLD)
+                        } else {
+                            S::default().bg(C::Indexed(236)).fg(C::White)
+                        };
+                        let padded = format!("{:<width$}", label, width = popup_w as usize);
+                        frame.buffer_mut().set_string(popup_area.x, y, &padded, style);
+                        if is_selected {
+                            let sel_style = S::default().bg(C::Blue).fg(C::Cyan);
+                            frame.buffer_mut().set_string(popup_area.x, y, " \u{25b8}", sel_style);
+                        }
+                    }
+                }
+            }
         })?;
 
         if app.should_quit {
@@ -4175,6 +4315,41 @@ pub async fn run(mut app: App) -> Result<()> {
                             continue;
                         }
                         crossterm::event::KeyCode::Esc => {
+                            app.mode = InputMode::Normal;
+                            continue;
+                        }
+                        _ => { continue; }
+                    }
+                }
+                InputMode::AttachmentPopup => {
+                    match key.code {
+                        crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
+                            if let Some(ref mut popup) = app.attachment_popup {
+                                if popup.selected < 1 { popup.selected = 1; }
+                            }
+                            continue;
+                        }
+                        crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Char('k') => {
+                            if let Some(ref mut popup) = app.attachment_popup {
+                                popup.selected = 0;
+                            }
+                            continue;
+                        }
+                        crossterm::event::KeyCode::Enter => {
+                            if let Some(popup) = app.attachment_popup.take() {
+                                app.mode = InputMode::Normal;
+                                if popup.selected == 0 {
+                                    // Open
+                                    app.open_attachment(&popup.message_id, &popup.content_id).await;
+                                } else {
+                                    // Save
+                                    app.save_attachment(&popup.message_id, &popup.content_id).await;
+                                }
+                            }
+                            continue;
+                        }
+                        crossterm::event::KeyCode::Esc | crossterm::event::KeyCode::Char('q') => {
+                            app.attachment_popup = None;
                             app.mode = InputMode::Normal;
                             continue;
                         }
