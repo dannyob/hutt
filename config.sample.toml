@@ -10,8 +10,7 @@
 # ---------------------------------------------------------------------------
 
 # Editor command used when composing messages.
-# Hutt will try to open the editor in a kitty/tmux split if possible,
-# otherwise it blocks the TUI until the editor exits.
+# The TUI suspends while the editor runs; it resumes when you quit.
 # Default: "nvim"
 editor = "nvim"
 
@@ -26,6 +25,13 @@ editor = "nvim"
 # Leave unset (or comment out) if you handle sync externally.
 # sync_command = "mbsync -a"
 # sync_command = "offlineimap -o -a Work"
+
+# Auto-sync: check for new mail periodically while idle.
+# check_mail_every = how often to sync, in minutes (decimals accepted)
+# check_mail_after = how long idle before auto-sync starts (default: 2.0)
+# Requires sync_command to be set. Disabled when not set.
+# check_mail_every = 5
+# check_mail_after = 2.0
 
 # ---------------------------------------------------------------------------
 # Accounts

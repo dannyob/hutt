@@ -13,6 +13,12 @@ pub struct Config {
     pub accounts: Vec<AccountConfig>,
     pub editor: String,
     pub sync_command: Option<String>,
+    /// Auto-sync interval in minutes (decimals accepted).
+    /// When set, hutt will run sync_command periodically while idle.
+    pub check_mail_every: Option<f64>,
+    /// Minutes of idle time before auto-sync starts (decimals accepted).
+    /// Defaults to 2.0 if check_mail_every is set.
+    pub check_mail_after: Option<f64>,
 
     #[serde(default)]
     pub bindings: BindingsSection,
@@ -40,6 +46,8 @@ impl Default for Config {
             accounts: Vec::new(),
             editor: "nvim".to_string(),
             sync_command: None,
+            check_mail_every: None,
+            check_mail_after: None,
 
             bindings: BindingsSection::default(),
             conversations: false,

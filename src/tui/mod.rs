@@ -2801,6 +2801,8 @@ pub async fn run(mut app: App) -> Result<()> {
 
     let sequence_timeout = Duration::from_millis(1000);
     let mut last_key_time = Instant::now();
+    let mut last_interaction_time = Instant::now();
+    let mut last_auto_sync_time: Option<Instant> = None;
     let mut event_stream = EventStream::new();
 
     loop {
@@ -3413,6 +3415,37 @@ pub async fn run(mut app: App) -> Result<()> {
             }
             _ = tokio::time::sleep(timeout) => None,
         };
+
+        // Reset idle timer on any user interaction
+        if event.is_some() {
+            last_interaction_time = Instant::now();
+            last_auto_sync_time = None; // reset cycle on interaction
+        }
+
+        // Auto-sync: check mail periodically while idle
+        if let Some(interval_mins) = app.config.check_mail_every {
+            let idle_threshold = Duration::from_secs_f64(
+                app.config.check_mail_after.unwrap_or(2.0) * 60.0,
+            );
+            let interval = Duration::from_secs_f64(interval_mins * 60.0);
+            let idle_for = last_interaction_time.elapsed();
+
+            if idle_for >= idle_threshold
+                && !app.indexing
+                && app.shell_pending.is_none()
+                && app.config.effective_sync_command(app.active_account).is_some()
+            {
+                let should_sync = match last_auto_sync_time {
+                    None => true,
+                    Some(t) => t.elapsed() >= interval,
+                };
+                if should_sync {
+                    debug_log!("auto-sync: idle {:.0}s, triggering sync", idle_for.as_secs_f64());
+                    last_auto_sync_time = Some(Instant::now());
+                    let _ = app.handle_action(Action::SyncMail).await;
+                }
+            }
+        }
 
         // Handle mouse events
         if let Some(Event::Mouse(mouse)) = event {
