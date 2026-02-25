@@ -3,6 +3,26 @@ use std::collections::HashSet;
 
 use crate::config::{BindingValue, BindingsSection};
 
+/// Available sort fields for the envelope list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortField {
+    Date,
+    From,
+    Subject,
+    To,
+}
+
+impl SortField {
+    pub fn label(self) -> &'static str {
+        match self {
+            SortField::Date => "Date",
+            SortField::From => "From",
+            SortField::Subject => "Subject",
+            SortField::To => "To",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputMode {
     Normal,
@@ -17,6 +37,7 @@ pub enum InputMode {
     AccountPicker,
     MoveToFolder,
     AttachmentPopup,
+    SortPicker,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -111,6 +132,10 @@ pub enum Action {
     DeleteFolder,
 
     // Account picker
+
+    // Sort
+    SortPicker,
+    ReverseSort,
     OpenAccountPicker,
 
     // Custom bindings
@@ -320,6 +345,8 @@ pub fn parse_action_name(name: &str) -> Result<Action, String> {
         "edit_folder" => Ok(Action::EditFolder),
         "delete_folder" => Ok(Action::DeleteFolder),
         "open_account_picker" | "account_picker" => Ok(Action::OpenAccountPicker),
+        "sort" | "sort_picker" => Ok(Action::SortPicker),
+        "reverse_sort" => Ok(Action::ReverseSort),
         "quit" => Ok(Action::Quit),
         _ => Err(format!("unknown action: {:?}", name)),
     }
@@ -417,6 +444,8 @@ fn action_to_name(action: &Action) -> Option<String> {
         Action::EditFolder => "edit_folder",
         Action::DeleteFolder => "delete_folder",
         Action::OpenAccountPicker => "account_picker",
+        Action::SortPicker => "sort_picker",
+        Action::ReverseSort => "reverse_sort",
         Action::Quit => "quit",
         Action::Redraw => "redraw",
         _ => return None,
@@ -615,6 +644,10 @@ impl KeyMapper {
                 ("filter_unread", "U", "Filter unread"),
                 ("filter_starred", "S", "Filter starred"),
                 ("filter_needs_reply", "R", "Filter needs reply"),
+            ]),
+            ("Sort", &[
+                ("sort_picker", "o", "Sort by field"),
+                ("reverse_sort", "O", "Reverse sort order"),
             ]),
             ("Selection", &[
                 ("toggle_select", "x", "Toggle select"),
@@ -872,6 +905,10 @@ impl KeyMapper {
 
             // Conversations
             (KeyCode::Char('V'), KeyModifiers::SHIFT) => Action::ToggleConversations,
+
+            // Sort
+            (KeyCode::Char('o'), KeyModifiers::NONE) => Action::SortPicker,
+            (KeyCode::Char('O'), KeyModifiers::SHIFT) => Action::ReverseSort,
 
             // Help
             (KeyCode::Char('?'), _) => Action::ShowHelp,
