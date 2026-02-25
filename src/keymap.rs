@@ -16,6 +16,7 @@ pub enum InputMode {
     MaildirCreate,
     AccountPicker,
     MoveToFolder,
+    AttachmentPopup,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -749,7 +750,8 @@ impl KeyMapper {
             | InputMode::SmartFolderCreate
             | InputMode::SmartFolderName
             | InputMode::MaildirCreate
-            | InputMode::AccountPicker => {
+            | InputMode::AccountPicker
+            | InputMode::AttachmentPopup => {
                 return self.handle_input(key);
             }
             _ => {}
