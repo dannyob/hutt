@@ -2545,12 +2545,38 @@ impl App {
 
             // Conversations
             Action::ToggleConversations => {
+                // Capture the currently selected message before switching
+                let anchor_msgid = if self.conversations_mode {
+                    // Switching TO envelope view: use the first message of the selected conversation
+                    self.conversations.get(self.selected)
+                        .and_then(|c| c.messages.first())
+                        .map(|e| e.message_id.clone())
+                } else {
+                    // Switching TO conversations view: use the currently selected envelope
+                    self.envelopes.get(self.selected)
+                        .map(|e| e.message_id.clone())
+                };
+
                 self.conversations_mode = !self.conversations_mode;
-                self.selected = 0;
-                self.scroll_offset = 0;
                 self.preview_scroll = 0;
                 self.selected_set.clear();
                 self.rebuild_conversations();
+
+                // Restore position to the anchored message
+                if let Some(ref mid) = anchor_msgid {
+                    let new_idx = if self.conversations_mode {
+                        self.conversations.iter().position(|c| {
+                            c.messages.iter().any(|e| e.message_id == *mid)
+                        })
+                    } else {
+                        self.envelopes.iter().position(|e| e.message_id == *mid)
+                    };
+                    self.selected = new_idx.unwrap_or(0);
+                } else {
+                    self.selected = 0;
+                }
+                self.scroll_offset = self.selected.saturating_sub(5);
+
                 if self.conversations_mode {
                     self.set_status("Conversations view");
                 } else {
