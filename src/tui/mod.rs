@@ -104,6 +104,21 @@ pub struct PrefetchItem {
     pub account_idx: usize,
     pub folder: String,
     pub query: String,
+    pub max_num: u32,
+}
+
+/// Partial caches hold the first ~100 envelopes for instant display;
+/// full caches hold the complete result set (up to 10,000).
+#[derive(Clone)]
+pub enum CacheEntry {
+    Partial(Vec<Envelope>),
+    Full(Vec<Envelope>),
+}
+
+impl CacheEntry {
+    pub fn is_full(&self) -> bool {
+        matches!(self, CacheEntry::Full(_))
+    }
 }
 
 pub struct TabRegion {
@@ -296,10 +311,12 @@ pub struct App {
     // Attachment popup state
     pub attachment_popup: Option<AttachmentPopup>,
 
-    // Folder query cache: (account_index, query_string) → envelopes.
-    // Invalidated per-account on triage/reindex. Survives account switches
-    // so prefetched results for other accounts are ready immediately.
-    pub folder_cache: HashMap<(usize, String), Vec<Envelope>>,
+    // Folder query cache: (account_index, query_string) → CacheEntry.
+    // Partial entries hold first ~100 results for instant display;
+    // full entries hold the complete dataset. Invalidated per-account
+    // on triage/reindex. Survives account switches so prefetched
+    // results for other accounts are ready immediately.
+    pub folder_cache: HashMap<(usize, String), CacheEntry>,
     // When true, collect_known_folders() will rescan the maildir tree.
     // Set on reindex and account switch; cleared after scan.
     pub known_folders_dirty: bool,
@@ -458,11 +475,11 @@ impl App {
     }
 
     /// Queue prefetch for adjacent tabs, interleaved across all accounts.
-    /// Active account gets every other slot; other accounts' inboxes appear early.
+    /// Two passes: first a fast partial load (100 envelopes) for every folder,
+    /// then a full load (10,000) to backfill complete datasets.
     fn queue_prefetch(&mut self) {
         self.prefetch_queue.clear();
 
-        // Build per-account ordered folder lists
         let active = self.active_account;
         let active_folders = self.tabs_for_account(active, Some(&self.current_folder));
         let mut other_folders: Vec<(usize, Vec<String>)> = Vec::new();
@@ -477,56 +494,73 @@ impl App {
             }
         }
 
-        // Interleave: active, other[0], active, other[1], active, other[0], ...
-        let mut active_iter = active_folders.into_iter();
-        let mut other_iters: Vec<(usize, std::vec::IntoIter<String>)> = other_folders
-            .into_iter()
-            .map(|(idx, v)| (idx, v.into_iter()))
-            .collect();
-        let mut other_round = 0;
-        let mut done = false;
-        while !done {
-            done = true;
-            // One from active account
-            if let Some(folder) = active_iter.next() {
-                let query = self.query_for_folder(&folder);
-                if !self.folder_cache.contains_key(&(active, query.clone())) {
-                    self.prefetch_queue.push(PrefetchItem {
-                        account_idx: active,
-                        folder,
-                        query,
-                    });
+        // Collect (account_idx, folder, query) tuples in interleaved order
+        let mut ordered: Vec<(usize, String, String)> = Vec::new();
+        {
+            let mut active_iter = active_folders.into_iter();
+            let mut other_iters: Vec<(usize, std::vec::IntoIter<String>)> = other_folders
+                .into_iter()
+                .map(|(idx, v)| (idx, v.into_iter()))
+                .collect();
+            let mut other_round = 0;
+            let mut done = false;
+            while !done {
+                done = true;
+                if let Some(folder) = active_iter.next() {
+                    let query = self.query_for_folder(&folder);
+                    ordered.push((active, folder, query));
+                    done = false;
                 }
-                done = false;
-            }
-            // One from the next other account (round-robin)
-            if !other_iters.is_empty() {
-                let start = other_round % other_iters.len();
-                // Try each other account starting from current round-robin position
-                for i in 0..other_iters.len() {
-                    let pos = (start + i) % other_iters.len();
-                    let (acct_idx, ref mut iter) = other_iters[pos];
-                    if let Some(folder) = iter.next() {
-                        let query = self.query_for_account_folder(acct_idx, &folder);
-                        if !self.folder_cache.contains_key(&(acct_idx, query.clone())) {
-                            self.prefetch_queue.push(PrefetchItem {
-                                account_idx: acct_idx,
-                                folder,
-                                query,
-                            });
+                if !other_iters.is_empty() {
+                    let start = other_round % other_iters.len();
+                    for i in 0..other_iters.len() {
+                        let pos = (start + i) % other_iters.len();
+                        let (acct_idx, ref mut iter) = other_iters[pos];
+                        if let Some(folder) = iter.next() {
+                            let query = self.query_for_account_folder(acct_idx, &folder);
+                            ordered.push((acct_idx, folder, query));
+                            done = false;
+                            other_round = pos + 1;
+                            break;
                         }
-                        done = false;
-                        other_round = pos + 1;
-                        break;
                     }
+                    other_iters.retain(|(_, iter)| iter.len() > 0);
                 }
-                // Clean up exhausted iterators
-                other_iters.retain(|(_, iter)| iter.len() > 0);
             }
         }
+
+        // Pass 1: partial loads for folders that have no cache entry at all
+        for (acct, folder, query) in &ordered {
+            if !self.folder_cache.contains_key(&(*acct, query.clone())) {
+                self.prefetch_queue.push(PrefetchItem {
+                    account_idx: *acct,
+                    folder: folder.clone(),
+                    query: query.clone(),
+                    max_num: Self::PARTIAL_MAX_NUM,
+                });
+            }
+        }
+
+        // Pass 2: full loads for folders that don't have a full cache entry
+        for (acct, folder, query) in &ordered {
+            let is_full = self.folder_cache
+                .get(&(*acct, query.clone()))
+                .is_some_and(|e| e.is_full());
+            if !is_full {
+                self.prefetch_queue.push(PrefetchItem {
+                    account_idx: *acct,
+                    folder: folder.clone(),
+                    query: query.clone(),
+                    max_num: FindOpts::default().max_num,
+                });
+            }
+        }
+
         if !self.prefetch_queue.is_empty() {
-            debug_log!("prefetch: queued {} items across {} accounts",
-                self.prefetch_queue.len(), 1 + self.config.accounts.len() - 1);
+            debug_log!("prefetch: queued {} items ({} partial + {} full)",
+                self.prefetch_queue.len(),
+                self.prefetch_queue.iter().filter(|p| p.max_num == Self::PARTIAL_MAX_NUM).count(),
+                self.prefetch_queue.iter().filter(|p| p.max_num != Self::PARTIAL_MAX_NUM).count());
         }
     }
 
@@ -727,27 +761,48 @@ impl App {
         })
     }
 
+    /// Number of envelopes to fetch for a fast partial load.
+    const PARTIAL_MAX_NUM: u32 = 100;
+
     pub async fn load_folder(&mut self) -> Result<()> {
         let query = self.build_query();
         debug_log!("load_folder: query={:?} folder={:?}", query, self.current_folder);
         self.current_query = query.clone();
 
-        // Check folder cache before querying mu
         let cache_key = (self.active_account, query.clone());
-        if let Some(cached) = self.folder_cache.get(&cache_key) {
-            debug_log!("load_folder: cache HIT ({} envelopes)", cached.len());
-            self.envelopes = cached.clone();
-        } else {
-            self.envelopes = self.mu.find(&query, &FindOpts::default()).await?;
-            // If viewing the inbox, exclude messages that belong to splits
-            if self.is_inbox_folder() && !self.split_excluded.is_empty() {
-                let before = self.envelopes.len();
-                self.envelopes.retain(|e| !self.split_excluded.contains(&e.docid));
-                debug_log!("load_folder: split exclusion removed {} envelopes", before - self.envelopes.len());
+        let need_full = match self.folder_cache.get(&cache_key) {
+            Some(CacheEntry::Full(cached)) => {
+                debug_log!("load_folder: FULL cache hit ({} envelopes)", cached.len());
+                self.envelopes = cached.clone();
+                false
             }
-            debug_log!("load_folder: cache MISS, got {} envelopes from mu", self.envelopes.len());
-            self.folder_cache.insert(cache_key, self.envelopes.clone());
-        }
+            Some(CacheEntry::Partial(cached)) => {
+                debug_log!("load_folder: PARTIAL cache hit ({} envelopes), queueing full load", cached.len());
+                self.envelopes = cached.clone();
+                true
+            }
+            None => {
+                // Fast partial load: fetch first ~100 envelopes for instant display
+                let partial_opts = FindOpts { max_num: Self::PARTIAL_MAX_NUM, ..FindOpts::default() };
+                self.envelopes = self.mu.find(&query, &partial_opts).await?;
+                let mu_returned = self.envelopes.len() as u32;
+                if self.is_inbox_folder() && !self.split_excluded.is_empty() {
+                    let before = self.envelopes.len();
+                    self.envelopes.retain(|e| !self.split_excluded.contains(&e.docid));
+                    debug_log!("load_folder: split exclusion removed {} envelopes", before - self.envelopes.len());
+                }
+                debug_log!("load_folder: cache MISS, fast-loaded {} envelopes (mu returned {})", self.envelopes.len(), mu_returned);
+                // Check against what mu returned (before split exclusion)
+                // to determine if this is the complete result set
+                if mu_returned < Self::PARTIAL_MAX_NUM {
+                    self.folder_cache.insert(cache_key, CacheEntry::Full(self.envelopes.clone()));
+                    false
+                } else {
+                    self.folder_cache.insert(cache_key, CacheEntry::Partial(self.envelopes.clone()));
+                    true
+                }
+            }
+        };
 
         self.selected = 0;
         self.scroll_offset = 0;
@@ -758,6 +813,16 @@ impl App {
             self.known_folders_dirty = false;
         }
         self.queue_prefetch();
+
+        // If we only have a partial result, queue a priority full load
+        if need_full {
+            self.prefetch_queue.insert(0, PrefetchItem {
+                account_idx: self.active_account,
+                folder: self.current_folder.clone(),
+                query: self.current_query.clone(),
+                max_num: FindOpts::default().max_num,
+            });
+        }
         Ok(())
     }
 
@@ -2950,34 +3015,9 @@ fn gethostname() -> String {
 }
 
 pub async fn run(mut app: App) -> Result<()> {
+    // Fast partial load — renders immediately with first ~100 envelopes.
+    // Split caches and background servers are deferred to after first render.
     app.load_folder().await?;
-
-    // Populate split caches and re-filter inbox if needed
-    app.refresh_split_caches().await;
-    if app.is_inbox_folder() && !app.split_excluded.is_empty() {
-        app.load_folder().await?;
-    }
-
-    // Spawn background mu servers for non-active accounts (for prefetch)
-    if app.config.background_servers {
-        for idx in 0..app.config.accounts.len() {
-            if idx == app.active_account {
-                continue;
-            }
-            let muhome = app.config.effective_muhome(idx);
-            match MuClient::start(muhome.as_deref()).await {
-                Ok(client) => {
-                    let name = app.config.accounts[idx].name.as_str();
-                    debug_log!("background mu: started for account {} ({:?})", name, muhome);
-                    app.background_mu.insert(idx, client);
-                }
-                Err(e) => {
-                    let name = app.config.accounts.get(idx).map(|a| a.name.as_str()).unwrap_or("?");
-                    debug_log!("background mu: failed for account {} ({}), prefetch unavailable", name, e);
-                }
-            }
-        }
-    }
 
     // Start IPC listener as a background task, sending commands through a channel
     // Create shell result channel — replace the dummy one from App::new
@@ -3033,6 +3073,7 @@ pub async fn run(mut app: App) -> Result<()> {
     let mut last_interaction_time = Instant::now();
     let mut last_auto_sync_time: Option<Instant> = None;
     let mut event_stream = EventStream::new();
+    let mut startup_deferred = true;
 
     loop {
         app.clear_stale_status();
@@ -3388,6 +3429,39 @@ pub async fn run(mut app: App) -> Result<()> {
             }
         })?;
 
+        // Deferred startup: after the first render, do expensive initialization.
+        // This lets the TUI appear instantly with the partial inbox load.
+        if startup_deferred {
+            startup_deferred = false;
+
+            // Populate split caches and re-filter inbox if needed
+            app.refresh_split_caches().await;
+            if app.is_inbox_folder() && !app.split_excluded.is_empty() {
+                let _ = app.load_folder().await;
+            }
+
+            // Spawn background mu servers for non-active accounts (for prefetch)
+            if app.config.background_servers {
+                for idx in 0..app.config.accounts.len() {
+                    if idx == app.active_account {
+                        continue;
+                    }
+                    let muhome = app.config.effective_muhome(idx);
+                    match MuClient::start(muhome.as_deref()).await {
+                        Ok(client) => {
+                            let name = app.config.accounts[idx].name.as_str();
+                            debug_log!("background mu: started for account {} ({:?})", name, muhome);
+                            app.background_mu.insert(idx, client);
+                        }
+                        Err(e) => {
+                            let name = app.config.accounts.get(idx).map(|a| a.name.as_str()).unwrap_or("?");
+                            debug_log!("background mu: failed for account {} ({}), prefetch unavailable", name, e);
+                        }
+                    }
+                }
+            }
+        }
+
         if app.should_quit {
             break;
         }
@@ -3573,24 +3647,34 @@ pub async fn run(mut app: App) -> Result<()> {
         }
 
         // Background prefetch: run one queued query per loop iteration
-        // during idle time. Each query is fast (~1-100ms) so input lag
-        // is imperceptible. Skip if indexing (mu server is busy).
+        // during idle time. Partial loads (~100) are fast; full loads may
+        // take longer but still typically <100ms. Skip if indexing.
         if !app.prefetch_queue.is_empty() && !app.indexing {
             let item = app.prefetch_queue.remove(0);
             let cache_key = (item.account_idx, item.query.clone());
-            if !app.folder_cache.contains_key(&cache_key) {
-                // Pick the right mu server for this account
+            let is_partial = item.max_num == App::PARTIAL_MAX_NUM;
+
+            // Skip if we already have adequate cache for this request
+            let dominated = match app.folder_cache.get(&cache_key) {
+                Some(CacheEntry::Full(_)) => true,
+                Some(CacheEntry::Partial(_)) if is_partial => true,
+                _ => false,
+            };
+
+            if !dominated {
                 let mu_server = if item.account_idx == app.active_account {
                     Some(&mut app.mu)
                 } else {
                     app.background_mu.get_mut(&item.account_idx)
                 };
                 if let Some(mu) = mu_server {
-                    debug_log!("prefetch: [{}] fetching {:?}",
+                    let opts = FindOpts { max_num: item.max_num, ..FindOpts::default() };
+                    debug_log!("prefetch: [{}] fetching {:?} (max_num={})",
                         app.config.accounts.get(item.account_idx).map(|a| a.name.as_str()).unwrap_or("?"),
-                        item.folder);
-                    match mu.find(&item.query, &FindOpts::default()).await {
+                        item.folder, item.max_num);
+                    match mu.find(&item.query, &opts).await {
                         Ok(mut envelopes) => {
+                            let mu_returned = envelopes.len() as u32;
                             // Apply split exclusion for active account inbox
                             if item.account_idx == app.active_account {
                                 let is_inbox = app.account()
@@ -3600,10 +3684,48 @@ pub async fn run(mut app: App) -> Result<()> {
                                     envelopes.retain(|e| !app.split_excluded.contains(&e.docid));
                                 }
                             }
-                            debug_log!("prefetch: [{}] cached {:?} ({} envelopes)",
+
+                            // Check against what mu returned (before split
+                            // exclusion) to determine if this is complete
+                            let entry = if is_partial && mu_returned >= item.max_num {
+                                CacheEntry::Partial(envelopes.clone())
+                            } else {
+                                CacheEntry::Full(envelopes.clone())
+                            };
+                            debug_log!("prefetch: [{}] cached {:?} ({} envelopes, {})",
                                 app.config.accounts.get(item.account_idx).map(|a| a.name.as_str()).unwrap_or("?"),
-                                item.folder, envelopes.len());
-                            app.folder_cache.insert(cache_key, envelopes);
+                                item.folder, envelopes.len(),
+                                if entry.is_full() { "full" } else { "partial" });
+                            app.folder_cache.insert(cache_key, entry);
+
+                            // If this was a full load for the folder the user is
+                            // currently viewing, swap in the complete results live.
+                            if !is_partial
+                                && item.account_idx == app.active_account
+                                && item.folder == app.current_folder
+                            {
+                                // Preserve selection by message-id
+                                let selected_msgid = app.preview_envelope()
+                                    .map(|e| e.message_id.clone());
+                                app.envelopes = envelopes;
+                                app.rebuild_conversations();
+                                // Restore selection
+                                if let Some(ref mid) = selected_msgid {
+                                    let new_idx = if app.conversations_mode {
+                                        app.conversations.iter().position(|c| {
+                                            c.representative().message_id == *mid
+                                        })
+                                    } else {
+                                        app.envelopes.iter().position(|e| e.message_id == *mid)
+                                    };
+                                    if let Some(idx) = new_idx {
+                                        app.selected = idx;
+                                    }
+                                    // else: message no longer in results, keep selected=0
+                                }
+                                debug_log!("prefetch: live-swapped current folder {:?} ({} envelopes)",
+                                    item.folder, app.envelopes.len());
+                            }
                         }
                         Err(e) => {
                             debug_log!("prefetch: error for {:?}: {}", item.folder, e);
