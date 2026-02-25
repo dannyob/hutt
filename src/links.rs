@@ -37,6 +37,8 @@ use tokio::net::{UnixListener, UnixStream};
 pub enum HuttUrl {
     /// Open a message by Message-ID.
     Message { id: String, account: Option<String> },
+    /// Open a specific MIME part (attachment) by Message-ID and Content-ID (RFC 2392).
+    MessagePart { message_id: String, content_id: String, account: Option<String> },
     /// Open a thread by Message-ID.
     Thread { id: String, account: Option<String> },
     /// Run a search query.
@@ -74,14 +76,25 @@ pub fn format_thread_url(message_id: &str) -> String {
 /// - `hutt:navigate?folder=path[&account=name]`
 /// - Legacy: `hutt://message/id`, `hutt://thread/id`, `hutt://search/q`, `hutt://compose?...`
 pub fn parse_url(url: &str) -> Option<HuttUrl> {
-    // mid:<message-id>[?view=thread]
+    // mid:<message-id>[/<content-id>][?view=thread][&account=name]
     if let Some(rest) = url.strip_prefix("mid:") {
-        let (id, qs) = split_query(rest);
-        if id.is_empty() {
+        let (id_part, qs) = split_query(rest);
+        if id_part.is_empty() {
             return None;
         }
         let params = parse_query_string(qs);
         let account = params.get("account").cloned();
+
+        // Check for content-id: mid:message-id/content-id
+        if let Some(slash_pos) = id_part.find('/') {
+            let message_id = id_part[..slash_pos].to_string();
+            let content_id = id_part[slash_pos + 1..].to_string();
+            if !message_id.is_empty() && !content_id.is_empty() {
+                return Some(HuttUrl::MessagePart { message_id, content_id, account });
+            }
+        }
+
+        let id = url_decode(id_part);
         if params.get("view").map(|v| v.as_str()) == Some("thread") {
             return Some(HuttUrl::Thread { id: id.to_string(), account });
         }
@@ -217,7 +230,7 @@ pub fn open_html_in_browser(html: &[u8]) -> Result<()> {
     open_path(path.to_str().context("non-UTF-8 temp path")?)
 }
 
-fn open_path(target: &str) -> Result<()> {
+pub fn open_path(target: &str) -> Result<()> {
     let cmd = if cfg!(target_os = "macos") {
         "open"
     } else {
@@ -277,6 +290,12 @@ pub enum HuttUrlSerde {
         #[serde(skip_serializing_if = "Option::is_none")]
         account: Option<String>,
     },
+    MessagePart {
+        message_id: String,
+        content_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+    },
     Thread {
         id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -299,6 +318,7 @@ impl From<HuttUrl> for HuttUrlSerde {
     fn from(u: HuttUrl) -> Self {
         match u {
             HuttUrl::Message { id, account } => HuttUrlSerde::Message { id, account },
+            HuttUrl::MessagePart { message_id, content_id, account } => HuttUrlSerde::MessagePart { message_id, content_id, account },
             HuttUrl::Thread { id, account } => HuttUrlSerde::Thread { id, account },
             HuttUrl::Search { query, account } => HuttUrlSerde::Search { query, account },
             HuttUrl::Compose { to, subject, account } => HuttUrlSerde::Compose { to, subject, account },
@@ -310,6 +330,7 @@ impl From<HuttUrlSerde> for HuttUrl {
     fn from(s: HuttUrlSerde) -> Self {
         match s {
             HuttUrlSerde::Message { id, account } => HuttUrl::Message { id, account },
+            HuttUrlSerde::MessagePart { message_id, content_id, account } => HuttUrl::MessagePart { message_id, content_id, account },
             HuttUrlSerde::Thread { id, account } => HuttUrl::Thread { id, account },
             HuttUrlSerde::Search { query, account } => HuttUrl::Search { query, account },
             HuttUrlSerde::Compose { to, subject, account } => HuttUrl::Compose { to, subject, account },
@@ -516,6 +537,30 @@ mod tests {
     #[test]
     fn parse_mid_empty() {
         assert_eq!(parse_url("mid:"), None);
+    }
+
+    #[test]
+    fn parse_mid_with_content_id() {
+        assert_eq!(
+            parse_url("mid:abc@example.com/1.3"),
+            Some(HuttUrl::MessagePart {
+                message_id: "abc@example.com".into(),
+                content_id: "1.3".into(),
+                account: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_mid_with_content_id_and_account() {
+        assert_eq!(
+            parse_url("mid:abc@example.com/part.2?account=work"),
+            Some(HuttUrl::MessagePart {
+                message_id: "abc@example.com".into(),
+                content_id: "part.2".into(),
+                account: Some("work".into()),
+            })
+        );
     }
 
     // ── message: URLs (Apple Mail) ─────────────────────────────
