@@ -222,11 +222,20 @@ impl Config {
 
     /// Return the effective sync command for an account index.
     /// Uses the account's sync_command if set, otherwise falls back to global.
-    pub fn effective_sync_command(&self, account_idx: usize) -> Option<&str> {
-        self.accounts
+    /// Replaces `{account}` with the account name and `{maildir}` with the
+    /// account's maildir path (with `~` expanded).
+    pub fn effective_sync_command(&self, account_idx: usize) -> Option<String> {
+        let cmd = self
+            .accounts
             .get(account_idx)
             .and_then(|a| a.sync_command.as_deref())
-            .or(self.sync_command.as_deref())
+            .or(self.sync_command.as_deref())?;
+        let acct = self.accounts.get(account_idx)?;
+        let maildir = expand_tilde(&acct.maildir);
+        Some(
+            cmd.replace("{account}", &acct.name)
+                .replace("{maildir}", &maildir),
+        )
     }
 
     /// Return the effective muhome for an account.
@@ -629,8 +638,28 @@ mod tests {
             host = "smtp.p.com"
         "#;
         let cfg: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.effective_sync_command(0), Some("mbsync work"));
-        assert_eq!(cfg.effective_sync_command(1), Some("mbsync -a"));
+        assert_eq!(cfg.effective_sync_command(0).as_deref(), Some("mbsync work"));
+        assert_eq!(cfg.effective_sync_command(1).as_deref(), Some("mbsync -a"));
+    }
+
+    #[test]
+    fn effective_sync_command_interpolates_account_and_maildir() {
+        let home = std::env::var("HOME").unwrap();
+        let toml_str = r#"
+            sync_command = "mbsync {account} && tag-mail.sh {maildir}/Inbox"
+
+            [[accounts]]
+            name = "spesh"
+            email = "s@s.com"
+            maildir = "~/spesh-mail"
+            [accounts.smtp]
+            host = "smtp.s.com"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            cfg.effective_sync_command(0).as_deref(),
+            Some(format!("mbsync spesh && tag-mail.sh {}/spesh-mail/Inbox", home).as_str())
+        );
     }
 
     #[test]
