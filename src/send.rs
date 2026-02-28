@@ -228,10 +228,17 @@ fn build_message(raw_message: &str) -> Result<Message> {
 }
 
 /// Send a message via SMTP and return the formatted message bytes
-/// (for saving to Sent folder).
+/// (for saving to Sent folder).  Times out after 60 seconds.
 pub async fn send_message(raw_message: &str, config: &SmtpConfig) -> Result<Vec<u8>> {
-    let sender = SmtpSender::new(config).await?;
-    sender.send(raw_message).await
+    use std::time::Duration;
+    let timeout = Duration::from_secs(60);
+    let fut = async {
+        let sender = SmtpSender::new(config).await?;
+        sender.send(raw_message).await
+    };
+    tokio::time::timeout(timeout, fut)
+        .await
+        .map_err(|_| anyhow::anyhow!("SMTP send timed out after 60s"))?
 }
 
 #[cfg(test)]
