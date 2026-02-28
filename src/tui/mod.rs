@@ -2666,7 +2666,7 @@ impl App {
 
             // Sync — runs sync_command in background, then reindexes
             Action::SyncMail => {
-                if let Some(cmd) = self.config.effective_sync_command(self.active_account).map(|s| s.to_string()) {
+                if let Some(cmd) = self.config.effective_sync_command(self.active_account) {
                     self.set_status(format!("Syncing: {}...", cmd));
                     let tx = self.shell_tx.clone();
                     tokio::spawn(async move {
