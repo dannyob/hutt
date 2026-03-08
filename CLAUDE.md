@@ -44,7 +44,8 @@ Each widget is a separate module: `envelope_list` (message list), `preview` (mes
 ### Key subsystems
 - **Undo** (`undo.rs`): `UndoStack` tracks reversible triage (move, delete smart/maildir/split folder) for `z` key.
 - **Compose** (`compose.rs`): Launches external editor, builds RFC 2822 messages. TUI suspends during editing.
-- **SMTP** (`send.rs`): Sends via `lettre` with STARTTLS/SSL/OAuth2 support.
+- **SMTP** (`send.rs`): Sends via `lettre` with STARTTLS/SSL/OAuth2 support. `hutt send --account=NAME` provides headless CLI sending for scripts/agents (reads message from stdin or `--file`, auto-fills `From:`, saves to Sent).
+- **Maildir helpers** (`maildir.rs`): Shared utilities for maildir path expansion, saving messages to Sent folder, hostname/sequence generation.
 - **MIME rendering** (`mime_render.rs`): `RenderCache` caches rendered bodies keyed by (message_id, terminal_width). Uses `mail-parser` + `html2text`.
 - **URI schemes** (`links.rs`): Accepts `mid:` (RFC 2392), `message:` (Apple Mail), `mailto:` (RFC 6068), and `hutt:` (app-specific search/navigate). Bidirectional IPC: commands return `IpcResponse` (Ok/Error/MuFrames). `--sexp`/`--json`/`--wrapped` flags on `hutt remote` format the response for scripting. Unix socket IPC at `$XDG_RUNTIME_DIR/hutt.sock`. All IPC commands accept optional `account` parameter. Legacy `hutt://` URLs accepted for backwards compatibility.
 - **Smart folders** (`smart_folders.rs`): Saved mu queries, persisted as TOML in `~/.config/hutt/smart-folders/`.
