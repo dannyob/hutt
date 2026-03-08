@@ -79,6 +79,13 @@ impl<'a> Widget for PreviewPane<'a> {
 
         // Add body lines from RenderedMessage
         if let Some(body) = self.body {
+            if body.is_html {
+                lines.push(Line::from(Span::styled(
+                    "[HTML message \u{2014} Ctrl+o to open in browser]",
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                )));
+                lines.push(Line::from(""));
+            }
             for rich_line in &body.lines {
                 let spans: Vec<Span> = rich_line
                     .iter()
@@ -88,7 +95,7 @@ impl<'a> Widget for PreviewPane<'a> {
             }
         } else {
             lines.push(Line::from(Span::styled(
-                "Loading…",
+                "Loading\u{2026}",
                 Style::default().fg(Color::DarkGray),
             )));
         }

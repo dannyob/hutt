@@ -91,6 +91,15 @@ impl<'a> Widget for ThreadView<'a> {
             // If expanded, show body
             if msg.expanded {
                 if let Some(ref body) = msg.body {
+                    if body.is_html {
+                        lines.push(RenderedLine {
+                            content: vec![(
+                                "[HTML message \u{2014} Ctrl+o to open in browser]".to_string(),
+                                header_base.fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                            )],
+                            msg_index: Some(idx),
+                        });
+                    }
                     for rich_line in &body.lines {
                         let content: Vec<(String, Style)> = rich_line
                             .iter()
