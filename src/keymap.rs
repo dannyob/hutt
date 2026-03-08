@@ -1014,6 +1014,8 @@ impl KeyMapper {
             (KeyCode::Char('r'), KeyModifiers::NONE) => Action::Reply,
             (KeyCode::Char('a'), KeyModifiers::NONE) => Action::ReplyAll,
             (KeyCode::Char('f'), KeyModifiers::NONE) => Action::Forward,
+            // Open in browser
+            (KeyCode::Char('o'), KeyModifiers::CONTROL) => Action::OpenInBrowser,
             // Folder cycling
             (KeyCode::Tab, _) => Action::NextFolder,
             (KeyCode::BackTab, _) => Action::PrevFolder,

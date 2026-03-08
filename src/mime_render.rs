@@ -40,6 +40,8 @@ pub struct LinkRegion {
 pub struct RenderedMessage {
     pub lines: Vec<Vec<RichSpan>>,
     pub links: Vec<LinkRegion>,
+    /// True when the body was rendered from HTML (no plaintext alternative).
+    pub is_html: bool,
 }
 
 impl RenderedMessage {
@@ -125,7 +127,7 @@ pub fn render_plain_text(text: &str, width: u16) -> RenderedMessage {
         }
     }
 
-    RenderedMessage { lines, links }
+    RenderedMessage { lines, links, is_html: false }
 }
 
 /// Scan a line for URLs and split into Normal / Link spans.
@@ -256,6 +258,7 @@ pub fn render_html(html: &[u8], width: u16) -> RenderedMessage {
                     kind: SpanKind::Normal,
                 }]],
                 links: Vec::new(),
+                is_html: true,
             };
         }
     };
@@ -296,7 +299,7 @@ pub fn render_html(html: &[u8], width: u16) -> RenderedMessage {
         lines.push(spans);
     }
 
-    RenderedMessage { lines, links }
+    RenderedMessage { lines, links, is_html: true }
 }
 
 /// Map html2text rich annotations to SpanKind.
@@ -584,6 +587,7 @@ pub fn render_message_from_bytes(
                 kind: SpanKind::Normal,
             }]],
             links: Vec::new(),
+            is_html: false,
         })
     };
 
