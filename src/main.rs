@@ -3,6 +3,7 @@ mod config;
 mod envelope;
 mod keymap;
 mod links;
+mod maildir;
 mod mime_render;
 mod mu_client;
 mod mu_sexp;
@@ -30,6 +31,7 @@ fn print_help() {
 
 USAGE:
     hutt [OPTIONS] [FOLDER]          Launch the TUI
+    hutt send --account=<NAME>       Send an email (headless, for scripts/agents)
     hutt remote <COMMAND> [ARGS]     Send command to a running instance
     hutt r <COMMAND> [ARGS]          (shorthand for remote)
     hutt server [OPTIONS]            Run as mu server proxy (drop-in replacement)
@@ -80,6 +82,11 @@ EXAMPLES:
     hutt r --json search from:alice     Search and output ndjson
     hutt r --sexp thread abc@host.com   Thread envelopes as sexp
     hutt r --json search q | jq '.path' Extract file paths with jq
+    echo 'To: bob@example.com      Send email from CLI (stdin)
+    Subject: Hi
+    
+    Hello!' | hutt send -a work
+    hutt send -a work --file=msg.eml  Send email from file
     hutt server                     Interactive mu server proxy
     hutt server --eval '(ping)'    Single command evaluation
     hutt server --muhome ~/.mu/work Select account by muhome
@@ -547,6 +554,154 @@ async fn run_mu_fallback(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// hutt send — headless email sending from CLI / scripts / agents
+// ---------------------------------------------------------------------------
+
+fn print_send_help() {
+    eprintln!(
+        "hutt send — send an email from the command line
+
+USAGE:
+    hutt send --account=<NAME> [--file=<PATH>]
+    <message> | hutt send --account=<NAME>
+
+The message uses the same format as the compose editor: RFC 2822-style
+headers (To, Subject, Cc, etc.) separated from the body by a blank line.
+The From header is auto-filled from the account config if not provided.
+
+OPTIONS:
+    -a, --account <NAME>    Account to send from (required)
+    --file <PATH>           Read message from file (default: stdin)
+    --no-save               Don't save a copy to the Sent folder
+    -h, --help              Show this help message
+
+EXAMPLES:
+    echo 'To: bob@example.com
+    Subject: Hello
+
+    Hi Bob!' | hutt send -a work
+
+    hutt send --account=personal --file=message.eml"
+    );
+}
+
+async fn run_send(args: &[String], config: &config::Config) -> Result<()> {
+    let mut account_name: Option<String> = None;
+    let mut file_path: Option<String> = None;
+    let mut save_to_sent = true;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-h" | "--help" => {
+                print_send_help();
+                return Ok(());
+            }
+            "-a" => {
+                i += 1;
+                account_name = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow::anyhow!("-a requires an account name"))?
+                        .clone(),
+                );
+            }
+            "--no-save" => {
+                save_to_sent = false;
+            }
+            arg if arg.starts_with("--account=") => {
+                account_name = Some(arg.strip_prefix("--account=").unwrap().to_string());
+            }
+            arg if arg.starts_with("--file=") => {
+                file_path = Some(arg.strip_prefix("--file=").unwrap().to_string());
+            }
+            "--file" => {
+                i += 1;
+                file_path = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow::anyhow!("--file requires a path"))?
+                        .clone(),
+                );
+            }
+            "--account" => {
+                i += 1;
+                account_name = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow::anyhow!("--account requires a name"))?
+                        .clone(),
+                );
+            }
+            other => bail!("hutt send: unknown argument '{}'\nRun 'hutt send --help' for usage", other),
+        }
+        i += 1;
+    }
+
+    let account_name = account_name
+        .ok_or_else(|| {
+            let names: Vec<&str> = config.accounts.iter().map(|a| a.name.as_str()).collect();
+            anyhow::anyhow!(
+                "hutt send requires --account=<NAME>\nAvailable accounts: {}",
+                names.join(", ")
+            )
+        })?;
+
+    let account = config
+        .accounts
+        .iter()
+        .find(|a| a.name == account_name)
+        .ok_or_else(|| {
+            let names: Vec<&str> = config.accounts.iter().map(|a| a.name.as_str()).collect();
+            anyhow::anyhow!(
+                "unknown account '{}'. Available: {}",
+                account_name,
+                names.join(", ")
+            )
+        })?;
+
+    // Read the message content
+    let raw_message = if let Some(ref path) = file_path {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read message file: {}", path))?
+    } else {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("failed to read message from stdin")?;
+        buf
+    };
+
+    if raw_message.trim().is_empty() {
+        bail!("empty message");
+    }
+
+    // Auto-fill From: header if not present
+    let message = if !raw_message
+        .lines()
+        .take_while(|l| !l.is_empty())
+        .any(|l| l.to_lowercase().starts_with("from:"))
+    {
+        format!("From: {}\n{}", account.email, raw_message)
+    } else {
+        raw_message
+    };
+
+    // Send via SMTP
+    let formatted = send::send_message(&message, &account.smtp)
+        .await
+        .context("failed to send message")?;
+
+    // Save to Sent folder
+    if save_to_sent {
+        if let Err(e) = maildir::save_to_sent(&account.maildir, &account.folders.sent, &formatted) {
+            eprintln!("Warning: sent but failed to save to Sent folder: {}", e);
+        }
+    }
+
+    eprintln!("Message sent via {}", account_name);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -571,6 +726,10 @@ async fn main() -> Result<()> {
             // Server subcommand (drop-in mu server replacement)
             "server" => {
                 return run_server(&args[i + 1..]).await;
+            }
+            // Send subcommand (headless email sending)
+            "send" => {
+                return run_send(&args[i + 1..], &config).await;
             }
             // Help/version
             "-h" | "--help" => {
