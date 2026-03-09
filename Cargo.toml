@@ -2,6 +2,7 @@
 name = "hutt"
 version = "0.1.0"
 edition = "2021"
+authors = ["Danny O'Brien <danny@spesh.com>"]
 license = "AGPL-3.0-or-later"
 description = "A fast, keyboard-driven TUI email client"
 
